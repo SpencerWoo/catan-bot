@@ -175,6 +175,58 @@ describe("setup placement portfolio", () => {
       expect(top[0].notes.join(" ")).toMatch(/adds .*(wheat|wood)/);
     }
   });
+
+  it("starting resources = one card per adjacent non-desert hex", async () => {
+    const { startingResourcesFor } = await import("./placement");
+    const v = board.vertices.find((v) => v.hexIds.length === 3)!;
+    const res = startingResourcesFor({ board, buildings: [], roads: [] }, v.id);
+    const kinds = v.hexIds.map((h) => board.hexes[h].kind).filter((k) => k !== "desert");
+    for (const k of new Set(kinds)) expect(res[k]).toBe(kinds.filter((x) => x === k).length);
+    expect(Object.values(res).reduce((a, b) => a + b, 0)).toBe(kinds.length);
+  });
+
+  it("second-player doubling: plans the pair, weaker payout placed FIRST", async () => {
+    const { advisePlacement, startingResourcesFor, openingValue } = await import("./placement");
+    // opp has placed exactly one settlement, we have none -> we're second and
+    // will place twice back-to-back; only our SECOND placement pays out.
+    const oppAt = board.vertices.findIndex((v) => v.hexIds.length === 3);
+    const state: GameState = {
+      board,
+      buildings: [{ vertexId: oppAt, player: 1, kind: "settlement" }],
+      roads: [],
+    };
+    const advice = advisePlacement(state, 0)!;
+    expect(advice.phase).toBe("setup");
+    expect(advice.heading).toMatch(/TWICE in a row/i);
+    expect(advice.note).toMatch(/back-to-back|2nd collects/i);
+    expect(advice.spots.length).toBe(2);
+    expect(advice.spots[0].label).toMatch(/place NOW/i);
+    expect(advice.spots[1].label).toMatch(/pays the starting hand/i);
+    // invariant of the rule: the paying pick must have the >= opening payout
+    const open = (id: number) => openingValue(startingResourcesFor(state, id));
+    expect(open(advice.spots[0].vertexId)).toBeLessThanOrEqual(open(advice.spots[1].vertexId));
+  });
+
+  it("second settlement as second player notes that this placement pays", async () => {
+    const { advisePlacement } = await import("./placement");
+    const ours = board.vertices.findIndex((v) => v.hexIds.length === 3);
+    const oppAt = board.vertices.findIndex((v) => v.hexIds.length === 3 && v.id !== ours);
+    const state: GameState = {
+      board,
+      buildings: [
+        { vertexId: ours, player: 0, kind: "settlement" },
+        { vertexId: oppAt, player: 1, kind: "settlement" },
+      ],
+      // our setup road is already down, so it's genuinely time to pick the
+      // second settlement (otherwise advice correctly points at the road)
+      roads: [
+        { edgeId: board.edges.findIndex((e) => e.a === ours || e.b === ours), player: 0 },
+      ],
+    };
+    const advice = advisePlacement(state, 0)!;
+    expect(advice.phase).toBe("setup");
+    expect(advice.note).toMatch(/COLLECTS the starting resources/i);
+  });
 });
 
 describe("placement weights", () => {

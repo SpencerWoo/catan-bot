@@ -148,6 +148,26 @@ export function placementWeights(board: Board): Record<Resource, number> {
 // ore-light) — value ore/wheat coverage above wood/brick, sheep least.
 const SETUP_NEED: Record<Resource, number> = { wheat: 1.3, ore: 1.35, wood: 0.95, brick: 0.95, sheep: 0.8 };
 
+/**
+ * Opening-hand value of a payout (1 card per adjacent hex): early roads eat
+ * brick+wood, wheat starts cities/dev buys, ore is the slowest opener.
+ */
+const OPENING_NEED: Record<Resource, number> = { brick: 1.3, wood: 1.2, wheat: 1.15, sheep: 0.8, ore: 0.75 };
+
+/** The starting resources a settlement would collect: one per adjacent non-desert hex. */
+export function startingResourcesFor(state: GameState, vertexId: number): Record<Resource, number> {
+  const out = Object.fromEntries(RESOURCES.map((r) => [r, 0])) as Record<Resource, number>;
+  for (const hid of state.board.vertices[vertexId].hexIds) {
+    const h = state.board.hexes[hid];
+    if (h.kind !== "desert") out[h.kind] += 1;
+  }
+  return out;
+}
+
+export function openingValue(res: Record<Resource, number>): number {
+  return RESOURCES.reduce((s, r) => s + res[r] * OPENING_NEED[r], 0);
+}
+
 export function rankSetupSpots(
   state: GameState,
   youPlayer: PlayerId,
@@ -313,6 +333,55 @@ export function advisePlacement(
       if (missing.length) note = `Your first spot lacks ${missing.join(", ")} — these picks weigh that heavily.`;
     }
     const top = rankSetupSpots(state, youPlayer, base, 3);
+
+    // Second-player doubling (1v1 snake draft: opp → you → YOU → opp): your
+    // two placements are back-to-back, so both spots are safe once you start,
+    // and ONLY the second one collects starting resources. Plan the pair:
+    // take the best two spots overall, placing the one with the WEAKER
+    // opening payout first — the stronger payout lands on the paying pick.
+    const mineCount = yourBuildings.length;
+    const oppCount = state.buildings.length - mineCount;
+    if (mineCount === 0 && oppCount === 1) {
+      const pool = rankSetupSpots(state, youPlayer, base, 6);
+      let bestPair: { first: (typeof pool)[number]; second: (typeof pool)[number]; score: number } | null = null;
+      for (let i = 0; i < pool.length; i++) {
+        for (let j = i + 1; j < pool.length; j++) {
+          const combined = pool[i].score + pool[j].score;
+          if (!bestPair || combined > bestPair.score) {
+            bestPair = { first: pool[i], second: pool[j], score: combined };
+          }
+        }
+      }
+      if (bestPair) {
+        const openFirst = openingValue(startingResourcesFor(state, bestPair.first.vertexId));
+        const openSecond = openingValue(startingResourcesFor(state, bestPair.second.vertexId));
+        const paysFirst = openFirst > openSecond; // the WEAKER payout goes first
+        const nowSpot = paysFirst ? bestPair.second : bestPair.first;
+        const paySpot = paysFirst ? bestPair.first : bestPair.second;
+        return {
+          phase: "setup",
+          heading: "You place TWICE in a row — plan the pair",
+          spots: [
+            {
+              vertexId: nowSpot.vertexId,
+              rank: 1,
+              label: `${describeVertex(state, nowSpot.vertexId)} — place NOW (this one won't collect resources)`,
+            },
+            {
+              vertexId: paySpot.vertexId,
+              rank: 2,
+              label: `${describeVertex(state, paySpot.vertexId)} — place SECOND (this one pays the starting hand)`,
+            },
+          ],
+          roadEdges: [],
+          note: "Going second, your two placements are back-to-back — nothing can be taken in between. Only the 2nd collects resources, so the weaker-opening corner goes first.",
+        };
+      }
+    }
+    if (mineCount === 1 && oppCount === 1) {
+      note = `${note ? note + " " : ""}This placement COLLECTS the starting resources — weight wood/brick/wheat adjacency.`;
+    }
+
     return {
       phase: "setup",
       heading: yourBuildings.length === 0 ? "Place your 1st settlement here" : "Place your 2nd settlement here",
