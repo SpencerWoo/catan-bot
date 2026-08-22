@@ -1,9 +1,13 @@
 import { RESOURCES, Resource, pips } from "../engine/types";
 import { GameEvent, ResourceDelta } from "./events";
+import { GameState } from "../engine/types";
+import { colonistIdForColor } from "./placement";
 
 export interface PlayerState {
   name: string;
   color: string;
+  /** colonist player id (1-8) for matching with board buildings/roads */
+  playerId: number | null;
   /** best-known hand; may drift by ±uncertainty after unknown steals */
   hand: Record<Resource, number>;
   /** cards whose identity we couldn't determine (unknown steals) */
@@ -63,12 +67,13 @@ function emptyHand(): Record<Resource, number> {
   return Object.fromEntries(RESOURCES.map((r) => [r, 0])) as Record<Resource, number>;
 }
 
-function getPlayer(state: TrackerState, name: string, color = "#888"): PlayerState {
+function getPlayer(state: TrackerState, name: string, color = "#888", playerId: number | null = null): PlayerState {
   let p = state.players.get(name);
   if (!p) {
     p = {
       name,
       color,
+      playerId,
       hand: emptyHand(),
       uncertainty: 0,
       settlements: 0,
@@ -84,6 +89,7 @@ function getPlayer(state: TrackerState, name: string, color = "#888"): PlayerSta
     state.players.set(name, p);
   }
   if (color !== "#888") p.color = color;
+  if (playerId !== null) p.playerId = playerId;
   return p;
 }
 
@@ -373,4 +379,115 @@ export function reconcileHandWithTotal(p: PlayerState): void {
  */
 export function visibleVp(p: PlayerState): number {
   return p.serverVp ?? p.settlements + p.cities * 2;
+}
+
+/** Inferred dev card distribution for an opponent. */
+export interface DevCardInference {
+  /** Likely has monopoly (hasn't played knight when robber blocks them, or we've seen monopoly used) */
+  likelyMonopoly: boolean;
+  /** Likely has knight (has played knight, or robber not on them but they could have one) */
+  likelyKnight: boolean;
+  /** Likely has road building */
+  likelyRoadBuilding: boolean;
+  /** Likely has year of plenty */
+  likelyYearOfPlenty: boolean;
+  /** Likely has victory point card (unplayed dev card when near win) */
+  likelyVpCard: boolean;
+  /** Total unplayed dev cards */
+  unplayedCount: number;
+  /** Confidence level 0-1 */
+  confidence: number;
+  /** Reasoning for the inference */
+  reasoning: string[];
+}
+
+/**
+ * Infer opponent's hidden dev cards from observable behavior.
+ * Key insights:
+ * - If robber is on opponent and they DON'T play knight -> they likely lack knight
+ * - Unplayed dev cards when opponent is near winning (8+ VP) -> likely VP cards
+ * - If opponent buys dev but doesn't play when blocked -> monopoly/YoP/VP
+ * - Dev card count - knights played = unplayed cards
+ */
+export function inferOpponentDevCards(
+  opponent: PlayerState,
+  robberHex: { x: number; y: number } | null,
+  _state: TrackerState,
+  board: GameState["board"] | null,
+  allBuildings: GameState["buildings"] | null,
+): DevCardInference {
+  const unplayedCount = Math.max(0, opponent.devCards - opponent.knightsPlayed);
+  const reasoning: string[] = [];
+  let likelyMonopoly = false;
+  let likelyKnight = false;
+  let likelyRoadBuilding = false;
+  let likelyYearOfPlenty = false;
+  let likelyVpCard = false;
+  let confidence = 0.3; // base
+
+  // 1. If robber is blocking opponent and they have dev cards but don't play knight
+  if (robberHex && board && allBuildings && unplayedCount > 0) {
+    // Match buildings to this opponent: prefer the WS player id, fall back to
+    // resolving their colonist color to a server id.
+    const oppId = opponent.playerId ?? colonistIdForColor(opponent.color);
+    const oppBuildings = oppId === null ? [] : allBuildings.filter(b => b.player === oppId);
+    const blocked = oppBuildings.some(b =>
+      board.vertices[b.vertexId].hexIds.some(
+        (hId: number) => {
+          const h = board.hexes[hId];
+          return h.q === robberHex.x && h.r === robberHex.y;
+        },
+      ),
+    );
+    if (blocked) {
+      likelyKnight = false; // they'd play it if they had it
+      likelyMonopoly = true; // unplayed card is likely monopoly/YoP/VP
+      confidence += 0.2;
+      reasoning.push("Robber blocks them but no knight played → likely monopoly/YoP/VP");
+    } else {
+      likelyKnight = true; // they might have knight but robber isn't on them
+      confidence += 0.1;
+      reasoning.push("Not blocked → could have knight");
+    }
+  }
+
+  // 2. Near win (8+ VP) with unplayed dev cards → likely VP cards
+  const oppVp = visibleVp(opponent);
+  if (oppVp >= 8 && unplayedCount > 0) {
+    likelyVpCard = true;
+    confidence += 0.3;
+    reasoning.push(`${oppVp} VP with ${unplayedCount} unplayed dev → likely VP card(s)`);
+  }
+
+  // 3. Many unplayed cards (3+) but not near win → monopoly/YoP/road building
+  if (unplayedCount >= 3 && oppVp < 8) {
+    likelyMonopoly = true;
+    likelyYearOfPlenty = true;
+    likelyRoadBuilding = true;
+    confidence += 0.2;
+    reasoning.push(`${unplayedCount} unplayed dev cards → monopoly/YoP/road building likely`);
+  }
+
+  // 4. If they've bought dev cards recently but not played, and robber isn't on them
+  // The unplayed cards are likely non-knight (they'd play knight if blocked)
+  if (unplayedCount > 0 && !likelyKnight && !likelyMonopoly) {
+    likelyMonopoly = true;
+    likelyYearOfPlenty = true;
+    confidence += 0.1;
+    reasoning.push("Unplayed dev cards, not blocked → monopoly/YoP likely");
+  }
+
+  // 5. Opponent has been stealing resources (monopoly evidence)
+  // This would come from game log events - simplified here
+
+  return {
+    likelyMonopoly,
+    likelyKnight,
+    likelyRoadBuilding,
+    likelyYearOfPlenty,
+    likelyVpCard,
+    unplayedCount,
+    confidence: Math.min(1, confidence),
+    reasoning,
+  };
 }

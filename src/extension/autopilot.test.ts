@@ -19,8 +19,9 @@ import {
   tradeTowardCost,
 } from "./autopilot";
 import { createTracker, applyEvent, applyServerPlayerState, findDiscardLimit } from "./tracker";
-import { rankLiveStrategies } from "./copilot";
-import { GameState } from "../engine/types";
+import { deckStatus, rankLiveStrategies } from "./copilot";
+import { distanceFromPlayer, isVertexBuildable } from "../engine/analysis";
+import { GameState, pips } from "../engine/types";
 
 const board = generateBoard(42);
 
@@ -471,7 +472,7 @@ describe("autopilot decisions", () => {
     expect(d?.kind).toBe("end-turn"); // nothing else affordable/reachable
   });
 
-  it("plays a knight BEFORE rolling by default (city-dev, under the limit)", () => {
+  it("holds a knight when nothing is blocked and Largest Army isn't decisive", () => {
     const t = trackerWith({}); // ~3 cards, under the limit
     const fits = rankLiveStrategies(t, "Nick");
     const cityDev = fits.find((f) => f.strategy.id === "city-dev")!;
@@ -483,9 +484,32 @@ describe("autopilot decisions", () => {
       advice: null,
       rolledThisTurn: false, // haven't rolled
       knightAvailable: true,
+      robberHex: { x: 99, y: 99 }, // robber on nobody
     });
-    expect(d?.kind).toBe("play-knight");
-    expect(d?.describe).toContain("before rolling");
+    expect(d?.kind).toBe("roll"); // save the knight — no win-critical use yet
+  });
+
+  it("saves a knight while an opponent is already robbed-blocked", () => {
+    const t = trackerWith({});
+    const gs = gsWithSettlement();
+    // an opponent building on a hex that doesn't touch our settlement
+    const myHexIds = board.vertices[gs.state.buildings[0].vertexId].hexIds;
+    const oppHex = board.hexes.find((h) => h.token !== null && !myHexIds.includes(h.id))!;
+    const oppV = board.vertices.find((v) => v.hexIds.includes(oppHex.id))!;
+    gs.state.buildings.push({ vertexId: oppV.id, player: 1, kind: "settlement" });
+    const fits = rankLiveStrategies(t, "Nick");
+    const cityDev = fits.find((f) => f.strategy.id === "city-dev")!;
+    const d = decideNext({
+      tracker: t,
+      youName: "Nick",
+      fit: cityDev,
+      gs,
+      advice: null,
+      rolledThisTurn: false,
+      knightAvailable: true,
+      robberHex: { x: oppHex.q, y: oppHex.r }, // Ava blocked; we're not
+    });
+    expect(d?.kind).toBe("roll"); // hold it for when WE get blocked
   });
 
   it("STOPS playing knights once it holds Largest Army (discipline)", () => {
@@ -506,12 +530,13 @@ describe("autopilot decisions", () => {
     expect(d?.kind).not.toBe("play-knight"); // hold the extra knights
   });
 
-  it("keeps playing knights to overtake a leading opponent's army", () => {
+  it("doesn't chase Largest Army unless it's win-critical", () => {
     const t = trackerWith({});
     t.players.get("Nick")!.knightsPlayed = 3;
+    applyEvent(t, { type: "place", player: "Ava", color: "#E27174", what: "settlement" });
     applyEvent(t, { type: "use-knight", player: "Ava" }); // build Ava's army...
     for (let i = 0; i < 4; i++) applyEvent(t, { type: "use-knight", player: "Ava" });
-    // Ava now has 5 knights, we have 3 -> we must reach 6 to take it back
+    // Ava has 5 knights to our 3, but she's nowhere near winning with it
     const fits = rankLiveStrategies(t, "Nick");
     const cityDev = fits.find((f) => f.strategy.id === "city-dev")!;
     const d = decideNext({
@@ -524,7 +549,30 @@ describe("autopilot decisions", () => {
       knightAvailable: true,
       robberHex: { x: 99, y: 99 },
     });
+    expect(d?.kind).not.toBe("play-knight"); // not decisive — hold for robber utility
+  });
+
+  it("plays knights to STEAL a win-critical Largest Army race", () => {
+    const t = trackerWith({});
+    t.players.get("Nick")!.knightsPlayed = 3;
+    applyEvent(t, { type: "place", player: "Ava", color: "#E27174", what: "settlement" });
+    for (let i = 0; i < 5; i++) applyEvent(t, { type: "use-knight", player: "Ava" });
+    const ava = t.players.get("Ava")!;
+    ava.serverVp = 8; // Ava at 8 VP holding LA — she wins next build unless we take it
+    const fits = rankLiveStrategies(t, "Nick");
+    const cityDev = fits.find((f) => f.strategy.id === "city-dev")!;
+    const d = decideNext({
+      tracker: t,
+      youName: "Nick",
+      fit: cityDev,
+      gs: gsWithSettlement(),
+      advice: null,
+      rolledThisTurn: true,
+      knightAvailable: true,
+      robberHex: { x: 99, y: 99 },
+    });
     expect(d?.kind).toBe("play-knight");
+    expect(d?.describe).toContain("Largest Army");
   });
 
   it("port-aware trading: gives the resource with the best (lowest) ratio", () => {
@@ -537,19 +585,22 @@ describe("autopilot decisions", () => {
     expect(trade?.giveCount).toBe(2); // 2:1 port, not 4:1
   });
 
-  it("rolls first, then plays the knight, when over the discard limit", () => {
+  it("rolls first, then plays the knight, when blocked AND over the discard limit", () => {
     // 10 cards (> limit 9): a 7 would force a discard, so roll before the knight
     const t = trackerWith({ sheep: 7, ore: 3 }, false);
+    const gs = gsWithSettlement();
+    const myHex = board.hexes[board.vertices[gs.state.buildings[0].vertexId].hexIds[0]];
     const fits = rankLiveStrategies(t, "Nick");
     const cityDev = fits.find((f) => f.strategy.id === "city-dev")!;
     const beforeRoll = decideNext({
       tracker: t,
       youName: "Nick",
       fit: cityDev,
-      gs: gsWithSettlement(),
+      gs,
       advice: null,
       rolledThisTurn: false,
       knightAvailable: true,
+      robberHex: { x: myHex.q, y: myHex.r },
     });
     expect(beforeRoll?.kind).toBe("roll"); // don't play the knight yet
 
@@ -557,10 +608,11 @@ describe("autopilot decisions", () => {
       tracker: t,
       youName: "Nick",
       fit: cityDev,
-      gs: gsWithSettlement(),
+      gs,
       advice: null,
       rolledThisTurn: true,
       knightAvailable: true,
+      robberHex: { x: myHex.q, y: myHex.r },
     });
     expect(afterRoll?.kind).toBe("play-knight");
   });
@@ -610,18 +662,33 @@ describe("autopilot decisions", () => {
 
   it("won't trade toward a settlement it has nowhere to place", () => {
     // game-log fix (loss): city resources were 4:1-traded toward settlements
-    // with no legal spot and no road path — pure waste.
-    const t = trackerWith({ wheat: 5, wood: 1, brick: 1 }, false);
-    const fits = rankLiveStrategies(t, "Nick");
+    // with no legal spot and no road path — pure waste. With NO placeable
+    // settlement AND no completable city, nothing proactively fires...
+    const t = trackerWith({ wheat: 2, wood: 1, brick: 1 }, false);
     const d = decideNext({
       tracker: t,
       youName: "Nick",
-      fit: fits[0],
+      fit: rankLiveStrategies(t, "Nick")[0],
       gs: gsWithSettlement(), // network is just the settlement itself — no spot
       advice: null, // and no advised road path to one
       rolledThisTurn: true,
     });
     expect(d?.kind).toBe("end-turn"); // hold the hand, don't burn it
+
+    // ...but at 7 cards the anti-discard rule DOES convert the fat pile into
+    // the strategy's need (a city target is placement-legal here).
+    const t2 = trackerWith({ wheat: 5, wood: 1, brick: 1 }, false);
+    const d2 = decideNext({
+      tracker: t2,
+      youName: "Nick",
+      fit: rankLiveStrategies(t2, "Nick")[0],
+      gs: gsWithSettlement(),
+      advice: null,
+      rolledThisTurn: true,
+    });
+    expect(d2?.kind).toBe("bank-trade");
+    expect(d2?.describe).toContain("avoiding 7");
+    if (d2?.kind === "bank-trade") expect(d2.trade!.give).toBe("wheat");
   });
 
   it("trades toward the ROADS + settlement together when the spot needs a road", () => {
@@ -1246,8 +1313,13 @@ describe("autopilot decisions", () => {
     expect(d?.describe).toContain("robber is on your tile");
   });
 
-  it("chases Largest Army with knights on ANY plan (until it holds it)", () => {
+  it("chases Largest Army only when it would WIN, on any plan", () => {
     const t = trackerWith({});
+    const nick = t.players.get("Nick")!;
+    nick.serverVp = 8; // LA (+2) reaches 10 — decisive
+    nick.knightsPlayed = 2; // one more knight takes (or ties for) the army
+    applyEvent(t, { type: "place", player: "Ava", color: "#E27174", what: "settlement" });
+    t.players.get("Ava")!.knightsPlayed = 1;
     const fits = rankLiveStrategies(t, "Nick");
     const cityDev = fits.find((f) => f.strategy.id === "city-dev")!;
     const roadExpand = fits.find((f) => f.strategy.id === "road-expand")!;
@@ -1257,12 +1329,27 @@ describe("autopilot decisions", () => {
       gs: gsWithSettlement(),
       advice: null,
       rolledThisTurn: true,
-      robberHex: null,
+      robberHex: { x: 99, y: 99 }, // robber on nobody
       knightAvailable: true,
     };
-    // 0 knights, under the army threshold -> play, regardless of strategy
     expect(decideNext({ ...base, fit: cityDev })?.kind).toBe("play-knight");
     expect(decideNext({ ...base, fit: roadExpand })?.kind).toBe("play-knight");
+  });
+
+  it("holds knights early when Largest Army wouldn't change the outcome", () => {
+    const t = trackerWith({});
+    applyEvent(t, { type: "place", player: "Ava", color: "#E27174", what: "settlement" });
+    const fits = rankLiveStrategies(t, "Nick");
+    const base = {
+      tracker: t,
+      youName: "Nick",
+      gs: gsWithSettlement(),
+      advice: null,
+      rolledThisTurn: true,
+      robberHex: { x: 99, y: 99 },
+      knightAvailable: true,
+    };
+    expect(decideNext({ ...base, fit: fits[0] })?.kind).not.toBe("play-knight");
   });
 
   it("executor plays a learned knight once per turn and not the turn it's bought", () => {
@@ -1283,12 +1370,15 @@ describe("autopilot decisions", () => {
 
     const t = trackerWith({});
     const cityDev = rankLiveStrategies(t, "Nick").find((f) => f.strategy.id === "city-dev")!;
+    const gs = gsWithSettlement();
+    const myHex = board.hexes[board.vertices[gs.state.buildings[0].vertexId].hexIds[0]];
     const ctx = {
       tracker: t,
-      gs: gsWithSettlement(),
+      gs,
       advice: null,
       fit: cityDev,
       knightsInHand: 2,
+      robberHex: { x: myHex.q, y: myHex.r }, // blocked — win-critical knight use
       now: 10_000,
     };
     ap.tick(ctx);
@@ -1726,5 +1816,140 @@ describe("forced discards", () => {
       rolledThisTurn: true,
     });
     expect(d?.kind).toBe("end-turn"); // no pressure — follow the strategy
+  });
+});
+
+describe("strategy upgrades (dice shoe, monopoly defense, robber blocking)", () => {
+  it("bank-trades surplus near the discard limit toward the strategy need", () => {
+    // 7 cards = limit(9) - 2: wood is fat, no build completable with trades
+    // (city needs ore+wheat), so the anti-discard dump path fires.
+    const t = trackerWith({ wood: 5, sheep: 2 }, false);
+    const fits = rankLiveStrategies(t, "Nick");
+    const d = decideNext({
+      tracker: t,
+      youName: "Nick",
+      fit: fits[0],
+      gs: gsWithSettlement(),
+      advice: null,
+      rolledThisTurn: true,
+    });
+    expect(d?.kind).toBe("bank-trade");
+    expect(d?.describe).toContain("avoiding 7");
+    if (d?.kind === "bank-trade") {
+      expect(d.trade!.give).toBe("wood"); // the fat pile goes
+      expect(["ore", "wheat", "brick"]).toContain(d.trade!.get); // a strategy need
+    }
+  });
+
+  it("dumps a fat pile when the opponent likely holds a monopoly", () => {
+    const t = trackerWith({ ore: 4, wheat: 1 }, false); // 5 cards — well under limit
+    applyEvent(t, { type: "place", player: "Ava", color: "#E27174", what: "settlement" });
+    const ava = t.players.get("Ava")!;
+    ava.devCards = 2; // two unplayed devs
+    ava.knightsPlayed = 0;
+
+    const gs = gsWithSettlement();
+    // Ava blocked by the robber on a hex that doesn't touch us -> she'd have
+    // played a knight if she had one -> unplayed cards are monopoly/VP.
+    const myHexIds = board.vertices[gs.state.buildings[0].vertexId].hexIds;
+    const oppHex = board.hexes.find((h) => h.token !== null && !myHexIds.includes(h.id))!;
+    const oppV = board.vertices.find((v) => v.hexIds.includes(oppHex.id))!;
+    gs.state.buildings.push({ vertexId: oppV.id, player: 1, kind: "settlement" });
+
+    const d = decideNext({
+      tracker: t,
+      youName: "Nick",
+      fit: rankLiveStrategies(t, "Nick")[0],
+      gs,
+      advice: null,
+      rolledThisTurn: true,
+      knightAvailable: false,
+      robberHex: { x: oppHex.q, y: oppHex.r },
+    });
+    expect(d?.kind).toBe("bank-trade");
+    expect(d?.describe).toContain("denying their likely monopoly");
+    if (d?.kind === "bank-trade") expect(d.trade!.give).toBe("ore"); // the bait pile
+  });
+
+  it("blocks the number likeliest to roll next (balanced-dice due-ness)", () => {
+    const t = createTracker("Nick");
+    for (let i = 0; i < 5; i++) applyEvent(t, { type: "roll", player: "Nick", total: 6 });
+    // sixes are exhausted in the shoe; nines still have all 4 combos
+    const deck = deckStatus(t);
+    const probOf = (n: number) => deck.prob.get(n) ?? pips(n) / 36;
+
+    const h6 = board.hexes.find((h) => h.token === 6)!;
+    const h9 = board.hexes.find((h) => h.token === 9)!;
+    // vertices must NOT touch the other hex, or both tiles would block both
+    const v6 = board.vertices.find((v) => v.hexIds.includes(h6.id) && !v.hexIds.includes(h9.id))!;
+    const v9 = board.vertices.find((v) => v.hexIds.includes(h9.id) && !v.hexIds.includes(h6.id))!;
+    const gs = {
+      state: {
+        board,
+        buildings: [
+          { vertexId: v6.id, player: 1, kind: "settlement" as const },
+          { vertexId: v9.id, player: 1, kind: "settlement" as const },
+        ],
+        roads: [],
+      },
+      youPlayer: 0 as const,
+    } as { state: GameState; youPlayer: 0 };
+    const r = bestRobberHex(gs.state, 0, null, () => true, probOf)!;
+    // The robber must land on a tile PAYING her due-9 corner (any hex touching
+    // v9 scores identically) — never on one paying only the cold 6.
+    const chosen = board.hexes.find((h) => h.q === r.hex.x && h.r === r.hex.y)!;
+    expect(board.vertices[v9.id].hexIds).toContain(chosen.id);
+    expect(board.vertices[v6.id].hexIds).not.toContain(chosen.id);
+  });
+
+  it("friendly robber parks on the spot the opponent is expanding into", () => {
+    // Ava settlement + one road; nobody robbable (<3 VP). The tile touching
+    // her road's far end should beat an arbitrary empty tile.
+    const vA = board.vertices.find((x) => x.hexIds.length === 3 && x.adjacent.length === 3)!;
+    const vB = vA.adjacent[0];
+    const eAB = board.edges.find(
+      (e) => (e.a === vA.id && e.b === vB) || (e.a === vB && e.b === vA.id),
+    )!;
+    const gs = {
+      state: {
+        board,
+        buildings: [
+          { vertexId: vA.id, player: 1, kind: "settlement" as const },
+        ],
+        roads: [{ edgeId: eAB.id, player: 1 }],
+      },
+      youPlayer: 0 as const,
+    } as { state: GameState; youPlayer: 0 };
+    const target = bestRobberHex(gs.state, 0, null, () => false)!;
+    expect(target.victim).toBeNull();
+    expect(target.describe).toContain("expanding into");
+    // the chosen tile touches SOME buildable corner within 2 edges of Ava's
+    // network — that's what "expanding into" means
+    const chosenHexId = board.hexes.find(
+      (h) => h.q === target.hex.x && h.r === target.hex.y,
+    )!.id;
+    const reachableCorners = board.vertices.filter(
+      (v) =>
+        isVertexBuildable(gs.state, v.id) &&
+        v.hexIds.includes(chosenHexId) &&
+        distanceFromPlayer(gs.state, 1, v.id) <= 2,
+    );
+    expect(reachableCorners.length).toBeGreaterThan(0);
+  });
+
+  it("snaps to a fresh-shoe view when colonist's early reshuffle likely fired", () => {
+    const t = createTracker("Nick");
+    // consume every combo in the shoe except one 8-card: 35 of 36 gone
+    t.rollsThisDeck = [];
+    for (let n = 2; n <= 12; n++) {
+      const count = pips(n) - (n === 8 ? 1 : 0);
+      for (let k = 0; k < count; k++) t.rollsThisDeck.push(n);
+    }
+    const deck = deckStatus(t);
+    expect(deck.totalRemaining).toBe(36); // refilled view — nothing is cold
+    expect(deck.remaining.get(8)).toBe(5); // all five 8-cards are back
+    expect(deck.cold).toEqual([]);
+    // and probabilities sit back at base rates
+    expect(deck.prob.get(8)).toBeCloseTo(5 / 36);
   });
 });

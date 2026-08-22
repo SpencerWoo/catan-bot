@@ -1,12 +1,25 @@
 import { GameState, PlayerId, RESOURCES, Resource, pips } from "../engine/types";
 import { vertexPips } from "../engine/board";
-import { isVertexBuildable } from "../engine/analysis";
+import { distanceFromPlayer, isVertexBuildable } from "../engine/analysis";
 import { pixelToColonistCorner, pixelsToColonistEdge } from "./coords";
 import { DomActionKind, tryDomAction, tryDomDiscard } from "./domActions";
 import { ActionKind, ProtocolLearner } from "./protocolLearner";
-import { LiveStrategyFit, expectedProduction, planDiscard } from "./copilot";
+import {
+  LiveStrategyFit,
+  deckStatus,
+  expectedProduction,
+  planDiscard,
+  productionTotal,
+} from "./copilot";
 import { PlacementAdvice } from "./placement";
-import { RESOURCE_TO_CARD_ID, TrackerState, handTotal, visibleVp } from "./tracker";
+import {
+  RESOURCE_TO_CARD_ID,
+  TrackerState,
+  PlayerState,
+  handTotal,
+  visibleVp,
+  inferOpponentDevCards,
+} from "./tracker";
 import { TradeOffer, decideTradeResponse, proposeTrade } from "./trading";
 
 export interface AutopilotDecision {
@@ -45,6 +58,122 @@ const BUILD_COSTS: Record<"road" | "settlement" | "city" | "dev", Partial<Record
 };
 
 type BankTrade = { give: Resource; get: Resource; giveCount: number };
+
+/** Minimum think time before committing the game's first settlement placement. */
+const FIRST_SETTLEMENT_THINK_MS = 30_000;
+
+/**
+ * Win probability estimation: compares your position vs opponent.
+ * Factors: VP delta, production delta, dev card threat, resource position.
+ * Returns 0-1 probability of winning.
+ */
+export interface WinProbability {
+  probability: number; // 0-1
+  factors: {
+    vpDelta: number; // your VP - opponent VP
+    productionDelta: number; // your pips/36 - opponent pips/36
+    devCardThreat: number; // opponent's inferred dev card danger
+    resourceRisk: number; // your hand vulnerability to monopoly/7
+    hasLargestArmy: boolean;
+    hasLongestRoad: boolean;
+  };
+  reasoning: string[];
+}
+
+export function estimateWinProbability(
+  you: PlayerState,
+  opponent: PlayerState,
+  state: TrackerState,
+  board: GameState["board"] | null,
+  robberHex: { x: number; y: number } | null,
+  allBuildings: GameState["buildings"] | null,
+): WinProbability {
+  const reasoning: string[] = [];
+  const yourVp = visibleVp(you);
+  const oppVp = visibleVp(opponent);
+  const vpDelta = yourVp - oppVp;
+
+  // Production delta (expected cards per roll)
+  const yourProd = productionTotal(expectedProduction(you));
+  const oppProd = productionTotal(expectedProduction(opponent));
+  const productionDelta = yourProd - oppProd;
+
+  // Dev card inference
+  const devInference = inferOpponentDevCards(opponent, robberHex, state, board, allBuildings);
+  let devCardThreat = 0;
+  if (devInference.likelyMonopoly) devCardThreat += 0.15;
+  if (devInference.likelyVpCard && oppVp >= 8) devCardThreat += 0.25;
+  if (devInference.likelyKnight) devCardThreat += 0.1;
+  if (devInference.likelyRoadBuilding && oppVp >= 7) devCardThreat += 0.1;
+  if (devInference.likelyYearOfPlenty) devCardThreat += 0.1;
+
+  // Resource risk: how vulnerable is your hand to monopoly/7
+  const yourHandTotal = handTotal(you);
+  const maxHandResource = Math.max(...RESOURCES.map(r => you.hand[r]));
+  let resourceRisk = 0;
+  if (yourHandTotal > state.discardLimit) resourceRisk += 0.1;
+  if (maxHandResource >= 5) resourceRisk += 0.1; // monopoly target
+  if (devInference.likelyMonopoly && maxHandResource >= 4) resourceRisk += 0.15;
+
+  // Army/road bonuses
+  const youHoldLA = you.knightsPlayed >= 3 && you.knightsPlayed > opponent.knightsPlayed;
+  const oppHoldLA = opponent.knightsPlayed >= 3 && opponent.knightsPlayed > you.knightsPlayed;
+  const youHoldLR = you.roads >= 5 && you.roads > opponent.roads;
+  const oppHoldLR = opponent.roads >= 5 && opponent.roads > you.roads;
+
+  // Base probability from VP (each VP ~10% win chance in 1v1)
+  let probability = 0.5 + vpDelta * 0.1;
+
+  // Production advantage (each pip/36 ~5%)
+  probability += productionDelta * 0.05;
+
+  // Dev card threat reduces your chance
+  probability -= devCardThreat;
+
+  // Resource risk reduces your chance
+  probability -= resourceRisk;
+
+  // Army/road
+  if (youHoldLA) { probability += 0.1; reasoning.push("You hold Largest Army (+2 VP)"); }
+  if (oppHoldLA) { probability -= 0.1; reasoning.push("Opponent holds Largest Army (-2 VP)"); }
+  if (youHoldLR) { probability += 0.1; reasoning.push("You hold Longest Road (+2 VP)"); }
+  if (oppHoldLR) { probability -= 0.1; reasoning.push("Opponent holds Longest Road (-2 VP)"); }
+
+  // Clamp
+  probability = Math.max(0.05, Math.min(0.95, probability));
+
+  if (vpDelta > 0) reasoning.push(`Leading by ${vpDelta} VP`);
+  else if (vpDelta < 0) reasoning.push(`Trailing by ${-vpDelta} VP`);
+  if (productionDelta > 0.1) reasoning.push(`Production advantage (${yourProd.toFixed(2)} vs ${oppProd.toFixed(2)} cards/roll)`);
+  else if (productionDelta < -0.1) reasoning.push(`Production deficit (${yourProd.toFixed(2)} vs ${oppProd.toFixed(2)} cards/roll)`);
+  if (devCardThreat > 0) reasoning.push(`Opponent dev card threat: ${devInference.reasoning.join(", ")}`);
+  if (resourceRisk > 0) reasoning.push(`Your hand vulnerable to monopoly/7 (${yourHandTotal} cards, max ${maxHandResource})`);
+
+  return {
+    probability,
+    factors: {
+      vpDelta,
+      productionDelta,
+      devCardThreat,
+      resourceRisk,
+      hasLargestArmy: youHoldLA,
+      hasLongestRoad: youHoldLR,
+    },
+    reasoning,
+  };
+}
+
+/**
+ * Delta-based decision: maximize (your outcome - opponent outcome).
+ * Instead of just maximizing your EV, consider what hurts opponent most.
+ */
+export interface DeltaDecision {
+  action: string;
+  yourGain: number; // expected VP gain for you
+  opponentLoss: number; // expected VP loss for opponent (blocking them)
+  netDelta: number; // yourGain + opponentLoss
+  reasoning: string;
+}
 
 /** Can we afford `cost` after trading surplus at these bank/port ratios? */
 export function affordableWithTrades(
@@ -118,6 +247,57 @@ export function planBankTrade(
   return null;
 }
 
+/** Trade surplus (4+ of one resource) to avoid 7-discard: give the least-valued
+ *  surplus resource at its best ratio for the most-needed resource by strategy.
+ *  Only trades if there's at least one buildable SPATIAL target (settlement/city/road)
+ *  in the plan — dev cards alone don't justify a 4:1 dump. */
+export function tradeSurplusToAvoidDiscard(
+  hand: Record<Resource, number>,
+  ratios: Partial<Record<Resource, number>>,
+  weights: Record<Resource, number>,
+  limit: number,
+  order: ReadonlyArray<keyof typeof BUILD_COSTS>,
+  fundingTarget: (item: keyof typeof BUILD_COSTS) => Partial<Record<Resource, number>> | null,
+): BankTrade | null {
+  const total = RESOURCES.reduce((s, r) => s + hand[r], 0);
+  if (total < limit - 2) return null; // not close enough to limit to worry
+
+  // Only act if there's at least one buildable SPATIAL target (not just dev cards)
+  const spatialItems: Array<keyof typeof BUILD_COSTS> = ["settlement", "city", "road"];
+  const hasBuildableSpatialTarget = order.some(
+    (item) => spatialItems.includes(item) && fundingTarget(item) !== null,
+  );
+  if (!hasBuildableSpatialTarget) return null;
+
+  // Find surplus resources (>= ratio for port/bank)
+  const surpluses: Array<{ resource: Resource; count: number; ratio: number }> = [];
+  for (const r of RESOURCES) {
+    const ratio = ratios[r] ?? 4;
+    if (hand[r] >= ratio) surpluses.push({ resource: r, count: hand[r], ratio });
+  }
+  if (surpluses.length === 0) return null;
+
+  // Most needed resource by strategy weight that we have < target
+  let need: Resource | null = null;
+  let needScore = -Infinity;
+  for (const r of RESOURCES) {
+    const score = weights[r] - hand[r] * 0.3; // high weight, low count = most needed
+    if (score > needScore) {
+      needScore = score;
+      need = r;
+    }
+  }
+  if (!need) return null;
+
+  // Pick the surplus with best (lowest) ratio, then least-valued by strategy
+  surpluses.sort((a, b) =>
+    a.ratio - b.ratio || weights[a.resource] - weights[b.resource],
+  );
+  const give = surpluses[0].resource;
+  const ratio = surpluses[0].ratio;
+  return { give, get: need, giveCount: ratio };
+}
+
 /** Flatten a discard plan into colonist wire card ids. */
 export function cardsToIds(cards: Partial<Record<Resource, number>>): number[] {
   const ids: number[] = [];
@@ -145,6 +325,8 @@ export function bestRobberHex(
   youPlayer: PlayerId,
   current: { x: number; y: number } | null,
   canRob: (player: PlayerId) => boolean = () => true,
+  /** conditional P(next roll = n) from the balanced-dice shoe count */
+  probOf?: (n: number) => number,
 ): { hex: { x: number; y: number }; victim: PlayerId | null; describe: string } | null {
   const oppOnTile = (hexId: number) =>
     state.buildings.filter(
@@ -152,6 +334,13 @@ export function bestRobberHex(
     );
   // Friendly robber: the tile is legal only if NO opponent on it is un-robbable.
   const tileLegal = (hexId: number) => oppOnTile(hexId).every((b) => canRob(b.player));
+
+  // Blocking value scales with how likely the token is to ROLL NEXT, not just
+  // its static pip weight: with balanced dice a due 9 beats an exhausted 6.
+  const combosOf = (token: number): number => {
+    if (!probOf) return pips(token);
+    return Math.max(0.25, probOf(token) * 36);
+  };
 
   let best: { score: number; hexId: number } | null = null;
   for (const hex of state.board.hexes) {
@@ -162,7 +351,7 @@ export function bestRobberHex(
     let mine = 0;
     for (const b of state.buildings) {
       if (!state.board.vertices[b.vertexId].hexIds.includes(hex.id)) continue;
-      const value = pips(hex.token) * (b.kind === "city" ? 2 : 1);
+      const value = combosOf(hex.token) * (b.kind === "city" ? 2 : 1);
       if (b.player === youPlayer) mine += value;
       else opp += value;
     }
@@ -177,8 +366,48 @@ export function bestRobberHex(
   }
 
   // Nothing robbable (friendly robber + every opponent under 3 VP): the robber
-  // still must move to a LEGAL tile — one touching no un-robbable opponent.
-  // Prefer a tile with no buildings at all so we block no one, including us.
+  // still must move to a LEGAL tile. Rather than an arbitrary empty tile, park
+  // it where the opponent is EXPANDING TOWARD — the best open corner on or
+  // next to their road network — so the placement denies their next claim even
+  // though it can't steal.
+  const oppPlayers = new Set(
+    state.buildings.filter((b) => b.player !== youPlayer).map((b) => b.player),
+  );
+  const expansionBlock = ((): { hexId: number; score: number } | null => {
+    if (oppPlayers.size === 0) return null;
+    let best: { hexId: number; score: number } | null = null;
+    for (const h of state.board.hexes) {
+      if (h.kind === "desert" || h.token === null) continue;
+      if (current && h.q === current.x && h.r === current.y) continue;
+      if (!tileLegal(h.id)) continue;
+      let blockScore = 0;
+      for (const v of state.board.vertices) {
+        if (!v.hexIds.includes(h.id)) continue;
+        if (!isVertexBuildable(state, v.id)) continue;
+        // how imminent is this corner for an opponent? road-distance from
+        // their network: 0-1 edges = settling now, 2 = building toward it.
+        let dist = Infinity;
+        for (const op of oppPlayers) {
+          dist = Math.min(dist, distanceFromPlayer(state, op, v.id));
+        }
+        if (dist > 2) continue;
+        blockScore += vertexPips(state.board, v.id) * (3 - dist);
+      }
+      if (blockScore > 0 && (!best || blockScore > best.score)) best = { hexId: h.id, score: blockScore };
+    }
+    return best;
+  })();
+  if (expansionBlock) {
+    const hex = state.board.hexes[expansionBlock.hexId];
+    return {
+      hex: { x: hex.q, y: hex.r },
+      victim: null,
+      describe: `robber to the ${hex.token}-${hex.kind} tile — blocks the spot they're expanding into (friendly robber — no one has 3+ points to rob)`,
+    };
+  }
+
+  // No opponent-expansion signal (or no legal such tile): fall back to any
+  // empty tile so we block no one, including ourselves.
   const neutral =
     state.board.hexes.find(
       (h) =>
@@ -315,9 +544,31 @@ export function decideNext(opts: {
   const you = tracker.players.get(youName);
   if (!you) return null;
   const allowed = (kind: ActionKind): boolean => !opts.allow || opts.allow.has(kind);
-  const board = gs?.state.board;
+  const board = gs?.state.board ?? null;
   const limit = opts.discardLimit ?? tracker.discardLimit;
   const handSize = handTotal(you);
+
+  // Opponent analysis: find the strongest opponent
+  const opponents = [...tracker.players.values()].filter((p) => p.name !== youName);
+  const mainOpponent = opponents.reduce((a, b) => visibleVp(b) > visibleVp(a) ? b : a, opponents[0]);
+  
+  // Infer opponent's hidden dev cards
+  const oppDevInference = mainOpponent 
+    ? inferOpponentDevCards(mainOpponent, robberHex ?? null, tracker, board, gs?.state.buildings ?? null)
+    : { likelyMonopoly: false, likelyKnight: false, likelyRoadBuilding: false, likelyYearOfPlenty: false, likelyVpCard: false, unplayedCount: 0, confidence: 0, reasoning: [] };
+  
+  // Win probability estimation
+  const winProb = mainOpponent && board
+    ? estimateWinProbability(you, mainOpponent, tracker, board, robberHex ?? null, gs?.state.buildings ?? null)
+    : { probability: 0.5, factors: { vpDelta: 0, productionDelta: 0, devCardThreat: 0, resourceRisk: 0, hasLargestArmy: false, hasLongestRoad: false }, reasoning: [] };
+  
+  // Balanced-dice shoe: conditional P(next roll = n) from the counted deck
+  // drives robber targeting (block the number likeliest to roll) and the
+  // 7-risk timing of anti-discard trading.
+  const deck = deckStatus(tracker);
+  const probOf = (n: number): number => deck.prob.get(n) ?? pips(n) / 36;
+  const base7 = 6 / 36;
+  const p7next = probOf(7);
 
   // Forced discard (a 7 while over the limit) resolves before anything else:
   // pick the worst cards ourselves instead of letting the game choose.
@@ -332,7 +583,7 @@ export function decideNext(opts: {
 
   // Robber placement takes priority: it blocks everything until resolved.
   if (robberPending && gs && gs.youPlayer !== null && board) {
-    const target = bestRobberHex(gs.state, gs.youPlayer, robberHex ?? null, opts.canRob);
+    const target = bestRobberHex(gs.state, gs.youPlayer, robberHex ?? null, opts.canRob, probOf);
     if (target) {
       return {
         kind: "move-robber",
@@ -379,10 +630,25 @@ export function decideNext(opts: {
 
   // Knight discipline (from game-log analysis: 13 knights played was wasteful).
   // Play a knight ONLY to un-block your own tile, or to take/hold Largest Army
-  // (>= 3 knights AND more than any opponent). Once you hold it, HOLD the rest —
-  // extra knights add zero VP.
+  // when it MATTERS for the win — not greedily. Once you hold it, HOLD the rest.
+  // DON'T play if an opponent is already blocked — save it for when YOU are blocked.
+  // Otherwise, use the robber as robber utility (block the strongest opponent).
   const knightReason = ((): string | null => {
     if (!opts.knightAvailable || !allowed("play-knight")) return null;
+
+    // Check if an opponent is currently blocked by the robber
+    const opponentBlocked =
+      !!robberHex &&
+      !!gs &&
+      !!board &&
+      gs.state.buildings.some(
+        (b) =>
+          b.player !== gs.youPlayer &&
+          board.vertices[b.vertexId].hexIds.some(
+            (h) => board.hexes[h].q === robberHex.x && board.hexes[h].r === robberHex.y,
+          ),
+      );
+
     const blockedMine =
       !!robberHex &&
       !!gs &&
@@ -396,14 +662,38 @@ export function decideNext(opts: {
           ),
       );
     if (blockedMine) return "the robber is on your tile";
+
+    // Don't waste a knight if an opponent is already blocked — save it for when you're blocked
+    if (opponentBlocked && !blockedMine) return null;
+
+    // Largest Army logic: only chase it if it's DECISIVE for the win.
+    // 1. You need it to win (close to 10 VP, +2 from LA would win).
+    // 2. You must PREVENT opponent from winning with it (they're close to 10 and have/near LA).
+    // Otherwise, save the knight for robber utility (block the leader).
     const myKnights = you.knightsPlayed;
+    const myVp = visibleVp(you);
     const oppMaxKnights = Math.max(
       0,
       ...[...tracker.players.values()].filter((p) => p.name !== youName).map((p) => p.knightsPlayed),
     );
-    // chase to 3 (Largest Army minimum) or 1 past a leading opponent; then stop.
-    const targetKnights = Math.max(3, oppMaxKnights + 1);
-    if (myKnights < targetKnights) return "to take/hold Largest Army";
+    const oppMaxVp = Math.max(
+      0,
+      ...[...tracker.players.values()].filter((p) => p.name !== youName).map((p) => visibleVp(p)),
+    );
+
+    const youHoldLA = myKnights >= 3 && myKnights > oppMaxKnights;
+    const oppHoldsLA = oppMaxKnights >= 3 && oppMaxKnights > myKnights;
+    const youNearWin = myVp >= 8; // LA (+2) would reach 10
+    const oppNearWin = oppMaxVp >= 8;
+
+    // Chase LA only if: you need it to win, or must stop opponent from winning with it.
+    const needLAForWin = youNearWin && !youHoldLA && myKnights >= 2;
+    const mustBlockOppLA = oppNearWin && (oppHoldsLA || oppMaxKnights >= 2) && myKnights < oppMaxKnights + 1;
+
+    if (needLAForWin) return "Largest Army would win the game";
+    if (mustBlockOppLA) return "must take Largest Army to stop opponent winning with it";
+
+    // Not decisive for LA — save knight for robber utility (handled by robber placement logic).
     return null;
   })();
 
@@ -446,6 +736,15 @@ export function decideNext(opts: {
   if (opts.hasMonopoly && allowed("play-monopoly")) {
     const opponents = [...tracker.players.values()].filter((p) => p.name !== youName);
     const oppCards = opponents.reduce((s, p) => s + (p.serverCards ?? handTotal(p)), 0);
+    
+    // Use dev card inference: if opponent likely has monopoly, we should be more
+    // careful about holding large single-resource piles, and we should play our
+    // monopoly to steal their most concentrated resource.
+    const mainOpp = opponents.reduce((a, b) => (b.serverCards ?? handTotal(b)) > (a.serverCards ?? handTotal(a)) ? b : a, opponents[0]);
+    const oppDevInference = mainOpp
+      ? inferOpponentDevCards(mainOpp, robberHex ?? null, tracker, board, gs?.state.buildings ?? null)
+      : { likelyMonopoly: false, likelyKnight: false, likelyRoadBuilding: false, likelyYearOfPlenty: false, likelyVpCard: false, unplayedCount: 0, confidence: 0, reasoning: [] };
+    
     if (oppCards >= 5) {
       // Estimated opponent holdings of each resource: production-mix share of
       // their card total. Resources they pump out and don't spend pile up.
@@ -464,21 +763,29 @@ export function decideNext(opts: {
       const shortForBuild = (r: Resource) =>
         fit.strategy.buildOrder.some((item) => (BUILD_COSTS[item][r] ?? 0) > you.hand[r]);
 
+      // If opponent likely has monopoly, prioritize stealing the resource we have
+      // the most of that they also likely have (prevent them from monopolizing us)
+      const weHaveLots = RESOURCES.filter(r => you.hand[r] >= 4);
       let bestRes: Resource | null = null;
       let bestScore = 0;
       for (const r of RESOURCES) {
-        const score = estHeld(r) + (shortForBuild(r) ? 0.75 : 0);
+        let score = estHeld(r) + (shortForBuild(r) ? 0.75 : 0);
+        // If we have 4+ of this and opponent likely has monopoly, STEAL IT FIRST
+        if (weHaveLots.includes(r) && oppDevInference.likelyMonopoly) score += 2;
         if (score > bestScore) {
           bestScore = score;
           bestRes = r;
         }
       }
-      // only worth it if the expected haul is meaningful (~2+ cards)
-      if (bestRes && estHeld(bestRes) >= 2) {
+      // only worth it if the expected haul is meaningful (~2+ cards) — but
+      // when the win-probability estimate says we're clearly BEHIND, gamble
+      // on a smaller haul: waiting compounds the deficit.
+      const haulFloor = winProb.probability < 0.4 ? 1.5 : 2;
+      if (bestRes && estHeld(bestRes) >= haulFloor) {
         return {
           kind: "play-monopoly",
           resource: bestRes,
-          describe: `play monopoly on ${bestRes} (~${estHeld(bestRes).toFixed(0)} cards from opponents)`,
+          describe: `play monopoly on ${bestRes} (~${estHeld(bestRes).toFixed(0)} cards from opponents)${weHaveLots.includes(bestRes) && oppDevInference.likelyMonopoly ? " [counter their monopoly]" : ""}`,
         };
       }
     }
@@ -661,12 +968,16 @@ export function decideNext(opts: {
   // supply/bank exhausted, a settlement with no reachable spot, or a city
   // with nothing to upgrade. A settlement that needs the advised road(s)
   // first is funded at the full claim cost (roads + settlement together).
+  // A road needs a valid advised edge to build.
   const fundingTarget = (item: keyof typeof COSTS): Partial<Record<Resource, number>> | null => {
     if (!canBuild(item)) return null;
-    if (item === "settlement" && gs && gs.youPlayer !== null && spotOnNetwork === null) {
+    // Spatial builds need the captured board to verify placement is possible.
+    if (!gs || gs.youPlayer === null || !board) return null;
+    if (item === "road" && (!advice || advice.roadEdges.length === 0)) return null;
+    if (item === "settlement" && spotOnNetwork === null) {
       return claim ? claim.cost : null;
     }
-    if (item === "city" && gs && gs.youPlayer !== null && ownSettlements === 0) return null;
+    if (item === "city" && ownSettlements === 0) return null;
     return BUILD_COSTS[item];
   };
 
@@ -837,6 +1148,64 @@ export function decideNext(opts: {
       }
     }
   }
+
+  // Near the discard limit with surplus: trade 4+ of one resource for what
+  // the strategy needs most, to avoid losing cards to a 7. Triggers within
+  // 2 cards of the limit — 3 when the balanced-dice shoe makes a 7
+  // disproportionately likely next. Only if there's a buildable target in
+  // the strategy order.
+  const sevenDue = p7next >= base7 * 1.25;
+  if (handSize >= limit - (sevenDue ? 3 : 2) && allowed("bank-trade")) {
+    const trade = tradeSurplusToAvoidDiscard(
+      you.hand,
+      you.bankRatio,
+      fit.strategy.weights,
+      limit,
+      order,
+      fundingTarget,
+    );
+    if (trade) {
+      return {
+        kind: "bank-trade",
+        trade,
+        describe: `bank-trade ${trade.giveCount} ${trade.give} for ${trade.get} (avoiding 7 discard — ${handSize}/${limit} cards)`,
+      };
+    }
+  }
+
+  // Monopoly defense: when the strongest opponent likely holds an unplayed
+  // monopoly, any fat single-resource pile is bait — one card strips ALL of
+  // it. Convert the pile into whatever the strategy needs next, even far below
+  // the discard limit. Gated on inference confidence so weak guesses don't
+  // trigger panic trades.
+  if (
+    oppDevInference.likelyMonopoly &&
+    oppDevInference.confidence >= 0.5 &&
+    handSize < limit - (sevenDue ? 3 : 2) &&
+    allowed("bank-trade")
+  ) {
+    const fat = [...RESOURCES].sort((a, b) => you.hand[b] - you.hand[a])[0];
+    if (you.hand[fat] >= 4) {
+      const ratio = you.bankRatio[fat] ?? 4;
+      // most-needed resource by strategy weight (same scoring as surplus dump)
+      let need: Resource | null = null;
+      let needScore = -Infinity;
+      for (const r of RESOURCES) {
+        const s = fit.strategy.weights[r] - you.hand[r] * 0.3;
+        if (s > needScore) {
+          needScore = s;
+          need = r;
+        }
+      }
+      if (need && need !== fat) {
+        return {
+          kind: "bank-trade",
+          trade: { give: fat, get: need, giveCount: ratio },
+          describe: `bank-trade ${ratio} ${fat} for ${need} (denying their likely monopoly)`,
+        };
+      }
+    }
+  }
   // (c) near the limit, nothing tradeable toward a build: a dev card beats a discard
   if (devBuyOk && handSize >= limit - 2) {
     return { kind: "buy-dev", describe: "buy a development card (hand near the limit, no trade toward a build)" };
@@ -913,6 +1282,8 @@ export class Autopilot {
   /** DOM controls (per action) we clicked but the game never confirmed. */
   private domFailed = new Map<DomActionKind, Set<string>>();
   private note = "off";
+  /** Hold time for the game's first settlement placement (think it through). */
+  private firstSettHold: number | null = null;
 
   constructor(
     private learner: ProtocolLearner,
@@ -932,7 +1303,10 @@ export class Autopilot {
   setEnabled(on: boolean): void {
     this.enabled = on;
     this.note = on ? "on — waiting for your turn" : "off";
-    if (!on) this.pending = null;
+    if (!on) {
+      this.pending = null;
+      this.firstSettHold = null;
+    }
   }
 
   onTurnState(currentColor: number, myColor: number | null): void {
@@ -1150,6 +1524,22 @@ export class Autopilot {
         ? "on — move the robber manually (board not captured or no good tile)"
         : "on — nothing to do";
       return;
+    }
+
+    // The game's FIRST settlement is the single most consequential move of the
+    // game — hold it for at least 30s so placement analysis settles before
+    // committing (and the human can veto). One-shot: once elapsed it places.
+    if (decision.kind === "build-settlement" && (ctx.gs?.state.buildings.length ?? 1) === 0) {
+      if (this.firstSettHold === null) {
+        this.firstSettHold = now + FIRST_SETTLEMENT_THINK_MS;
+        this.note = "thinking about the best opening spot…";
+        return;
+      }
+      if (now < this.firstSettHold) {
+        this.note = `thinking about the best opening spot… (${Math.ceil((this.firstSettHold - now) / 1000)}s)`;
+        return;
+      }
+      this.firstSettHold = null;
     }
 
     // Preferred: dispatch real colonist WebSocket action frames (rolls, builds,

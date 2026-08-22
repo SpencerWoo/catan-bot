@@ -22,6 +22,15 @@ export const COLONIST_COLORS: Record<number, string> = {
   8: "#8B5A2B",
 };
 
+/** Reverse lookup: colonist player id for a hex color, or null if unknown. */
+export function colonistIdForColor(color: string): number | null {
+  const want = color.toLowerCase();
+  for (const [id, c] of Object.entries(COLONIST_COLORS)) {
+    if (c.toLowerCase() === want) return Number(id);
+  }
+  return null;
+}
+
 export interface SpotAdvice {
   vertexId: number;
   rank: number;
@@ -146,15 +155,31 @@ export function rankSetupSpots(
   limit = 3,
 ) {
   const existing = playerProduction(state, youPlayer); // cards/roll
+  // Robber-vulnerability: pips grouped by NUMBER TOKEN across the whole
+  // network. If most of your income rides on one token, a single robber
+  // placement shuts your economy down — candidates that push the top-token
+  // share higher get penalized.
+  const netPipsByToken = new Map<number, number>();
+  const haveBuildings = state.buildings.some((b) => b.player === youPlayer);
+  for (const b of state.buildings) {
+    if (b.player !== youPlayer) continue;
+    for (const hid of state.board.vertices[b.vertexId].hexIds) {
+      const h = state.board.hexes[hid];
+      if (h.kind === "desert" || h.token === null) continue;
+      netPipsByToken.set(h.token, (netPipsByToken.get(h.token) ?? 0) + pips(h.token));
+    }
+  }
   const scored = state.board.vertices
     .filter((v) => isVertexBuildable(state, v.id))
     .map((v) => {
       const base = scoreVertex(state.board, v.id, weights);
       const add: Partial<Record<Resource, number>> = {};
+      const addByToken = new Map<number, number>();
       for (const hid of v.hexIds) {
         const h = state.board.hexes[hid];
         if (h.kind === "desert" || h.token === null) continue;
         add[h.kind] = (add[h.kind] ?? 0) + pips(h.token);
+        addByToken.set(h.token, (addByToken.get(h.token) ?? 0) + pips(h.token));
       }
       let utility = 0;
       for (const r of RESOURCES) {
@@ -172,6 +197,31 @@ export function rankSetupSpots(
       const coverageBonus = covers.reduce((acc, r) => acc + (r === "sheep" ? 1.0 : 2.5), 0);
       const score = utility * 3 + portBonus + coverageBonus; // ×3 puts it on scoreVertex's pip-ish scale
       const notes = [...base.notes];
+
+      // concentration check with this candidate merged into the network
+      if (haveBuildings && addByToken.size > 0) {
+        const merged = new Map(netPipsByToken);
+        let total = 0;
+        for (const n of merged.values()) total += n;
+        for (const [tok, n] of addByToken) {
+          merged.set(tok, (merged.get(tok) ?? 0) + n);
+          total += n;
+        }
+        let topShare = 0;
+        let topToken = 0;
+        for (const [tok, n] of merged) {
+          if (n / total > topShare) {
+            topShare = n / total;
+            topToken = tok;
+          }
+        }
+        if (topShare > 0.55) {
+          const penalty = (topShare - 0.55) * 12;
+          score -= penalty;
+          notes.push(`robber-vulnerable: ${(topShare * 100).toFixed(0)}% of pips on the ${topToken}`);
+        }
+      }
+
       if (covers.length && state.buildings.some((b) => b.player === youPlayer)) notes.push(`adds ${covers.join("+")} you lack`);
       return { ...base, score, notes };
     })

@@ -61,16 +61,17 @@ const CSS = `
     --desert: #55503e; --gold: #d4a017;
   }
 }
-/* Docked: a full-height column on the right edge; the page is narrowed by
+/* Docked: a full-height column on the left edge; the page is narrowed by
    the same width (html.cc-docked-page) so the game sits BESIDE the panel
    instead of underneath it. */
 #catan-copilot.cc-docked {
-  top: 0 !important; right: 0 !important; left: auto !important; bottom: 0;
+  top: 0 !important; left: 0 !important; right: auto !important; bottom: 0;
   width: var(--cc-dock-w); height: 100vh; max-height: 100vh;
-  border-radius: 0; border-width: 0 0 0 1px; box-shadow: -4px 0 18px rgba(0,0,0,.18);
+  border-radius: 0; border-width: 0 1px 0 0; box-shadow: 4px 0 18px rgba(0,0,0,.18);
 }
 #catan-copilot.cc-docked header { cursor: default; }
 html.cc-docked-page {
+  margin-left: var(--cc-dock-w) !important;
   width: calc(100% - var(--cc-dock-w)) !important;
   overflow-x: hidden;
 }
@@ -520,7 +521,9 @@ export class Overlay {
     }
 
     parts.push(this.renderHistory());
-    parts.push(this.renderAutopilot());
+    // Autopilot goes at the TOP (below any reload/game-over notice): the
+    // play-for-me switch is the most-used control.
+    parts.unshift(this.renderAutopilot());
     this.body.innerHTML = parts.join("");
   }
 
