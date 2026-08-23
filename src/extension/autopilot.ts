@@ -1,6 +1,6 @@
 import { GameState, PlayerId, RESOURCES, Resource, pips } from "../engine/types";
 import { vertexPips } from "../engine/board";
-import { distanceFromPlayer, isVertexBuildable } from "../engine/analysis";
+import { distanceFromPlayer, isVertexBuildable, playerProduction } from "../engine/analysis";
 import { pixelToColonistCorner, pixelsToColonistEdge } from "./coords";
 import { DomActionKind, tryDomAction, tryDomDiscard } from "./domActions";
 import { ActionKind, ProtocolLearner } from "./protocolLearner";
@@ -11,7 +11,7 @@ import {
   planDiscard,
   productionTotal,
 } from "./copilot";
-import { PlacementAdvice } from "./placement";
+import { PlacementAdvice, colonistIdForColor, spotContest } from "./placement";
 import {
   RESOURCE_TO_CARD_ID,
   TrackerState,
@@ -258,9 +258,11 @@ export function tradeSurplusToAvoidDiscard(
   limit: number,
   order: ReadonlyArray<keyof typeof BUILD_COSTS>,
   fundingTarget: (item: keyof typeof BUILD_COSTS) => Partial<Record<Resource, number>> | null,
+  /** how many cards before the limit the caller starts shedding (2 normal, 3 when a 7 is due / protecting) */
+  dist = 2,
 ): BankTrade | null {
   const total = RESOURCES.reduce((s, r) => s + hand[r], 0);
-  if (total < limit - 2) return null; // not close enough to limit to worry
+  if (total < limit - dist) return null; // not close enough to limit to worry
 
   // Only act if there's at least one buildable SPATIAL target (not just dev cards)
   const spatialItems: Array<keyof typeof BUILD_COSTS> = ["settlement", "city", "road"];
@@ -320,6 +322,36 @@ function describeCards(cards: Partial<Record<Resource, number>>): string {
  * un-robbable opponent (< 3 VP) is illegal to place on — colonist rejects it —
  * so we skip it and, if nothing is robbable, move the robber to a neutral tile.
  */
+/**
+ * The opponent's thinnest produced resource (their choke point). Blocking a
+ * tile of a resource they barely produce deepens the shortage they can least
+ * afford; returns null when they produce nothing observable.
+ */
+export function opponentStarveResource(state: GameState, oppPlayer: PlayerId): Resource | null {
+  const prod = playerProduction(state, oppPlayer);
+  let worst: Resource | null = null;
+  let worstVal = Infinity;
+  for (const r of RESOURCES) {
+    if (prod[r] > 0 && prod[r] < worstVal) {
+      worstVal = prod[r];
+      worst = r;
+    }
+  }
+  return worst;
+}
+
+/**
+ * Chess-style risk profile from the win-probability estimate: far behind ->
+ * buy variance (lotto tickets: dev cards, gambits); comfortably ahead ->
+ * shed variance early (dump before 7s, protect the lead).
+ */
+export type RiskMode = "lotto" | "neutral" | "protect";
+export function riskModeOf(probability: number): RiskMode {
+  if (probability <= 0.35) return "lotto";
+  if (probability >= 0.65) return "protect";
+  return "neutral";
+}
+
 export function bestRobberHex(
   state: GameState,
   youPlayer: PlayerId,
@@ -327,6 +359,8 @@ export function bestRobberHex(
   canRob: (player: PlayerId) => boolean = () => true,
   /** conditional P(next roll = n) from the balanced-dice shoe count */
   probOf?: (n: number) => number,
+  /** the victim's thinnest produced resource — tiles of it score 1.4x */
+  starve?: Resource | null,
 ): { hex: { x: number; y: number }; victim: PlayerId | null; describe: string } | null {
   const oppOnTile = (hexId: number) =>
     state.buildings.filter(
@@ -351,7 +385,10 @@ export function bestRobberHex(
     let mine = 0;
     for (const b of state.buildings) {
       if (!state.board.vertices[b.vertexId].hexIds.includes(hex.id)) continue;
-      const value = combosOf(hex.token) * (b.kind === "city" ? 2 : 1);
+      const value =
+        combosOf(hex.token) *
+        (b.kind === "city" ? 2 : 1) *
+        (starve && hex.kind === starve ? 1.4 : 1);
       if (b.player === youPlayer) mine += value;
       else opp += value;
     }
@@ -362,7 +399,12 @@ export function bestRobberHex(
   if (best) {
     const hex = state.board.hexes[best.hexId];
     const victim = oppOnTile(best.hexId)[0]?.player ?? null;
-    return { hex: { x: hex.q, y: hex.r }, victim, describe: `robber to the ${hex.token}-${hex.kind} tile` };
+    const starving = starve && hex.kind === starve;
+    return {
+      hex: { x: hex.q, y: hex.r },
+      victim,
+      describe: `robber to the ${hex.token}-${hex.kind} tile${starving ? ` — starving their ${hex.kind} choke` : ""}`,
+    };
   }
 
   // Nothing robbable (friendly robber + every opponent under 3 VP): the robber
@@ -561,6 +603,16 @@ export function decideNext(opts: {
   const winProb = mainOpponent && board
     ? estimateWinProbability(you, mainOpponent, tracker, board, robberHex ?? null, gs?.state.buildings ?? null)
     : { probability: 0.5, factors: { vpDelta: 0, productionDelta: 0, devCardThreat: 0, resourceRisk: 0, hasLargestArmy: false, hasLongestRoad: false }, reasoning: [] };
+  // Risk profile by game distance: far behind -> lotto (buy variance),
+  // comfortably ahead -> protect (shed variance before 7s eat the lead).
+  const riskMode = riskModeOf(winProb.probability);
+  // Opponent weakness: their thinnest produced resource (robber starvation).
+  const starveResource = ((): Resource | null => {
+    if (!board || !mainOpponent || gs?.youPlayer === null || gs === null) return null;
+    const oppId = mainOpponent.playerId ?? colonistIdForColor(mainOpponent.color);
+    if (oppId === null) return null;
+    return opponentStarveResource(gs.state, oppId as PlayerId);
+  })();
   
   // Balanced-dice shoe: conditional P(next roll = n) from the counted deck
   // drives robber targeting (block the number likeliest to roll) and the
@@ -583,7 +635,7 @@ export function decideNext(opts: {
 
   // Robber placement takes priority: it blocks everything until resolved.
   if (robberPending && gs && gs.youPlayer !== null && board) {
-    const target = bestRobberHex(gs.state, gs.youPlayer, robberHex ?? null, opts.canRob, probOf);
+    const target = bestRobberHex(gs.state, gs.youPlayer, robberHex ?? null, opts.canRob, probOf, starveResource);
     if (target) {
       return {
         kind: "move-robber",
@@ -893,13 +945,42 @@ export function decideNext(opts: {
       }
       // with a claim in reach, prefer funding it (trade loop) over a lone road
       const claimStuck = !!claim && !affordableWithTrades(you.hand, you.bankRatio, claim.cost);
-      const worthExtending = claim ? nearLimit && claimStuck : surplus || nearLimit;
+      // Race gate: if the closest opponent reaches spot ① as fast or faster,
+      // a multi-road commitment is a donation (game-log loss: we fed 2 roads
+      // into the middle while they connected first). Commit only when the
+      // whole claim lands THIS turn; otherwise save the roads.
+      const hasOpponent = gs.state.buildings.some((b) => b.player !== gs.youPlayer);
+      let raceLost = false;
+      let winningRace = false;
+      if (gs.youPlayer !== null && len > 0 && hasOpponent) {
+        const c = spotContest(gs.state, gs.youPlayer, advice.spots[0]?.vertexId ?? -1);
+        if (c.oppLen === null) {
+          winningRace = true; // opponents exist but none can reach the spot
+        } else {
+          // winning = a full road ahead; ties favor whoever moves next (them)
+          winningRace = c.ourLen + 1 <= c.oppLen;
+          if (!winningRace) {
+            // only race-worthy if the whole claim (roads+settlement) lands now
+            const finishNow = !!claim && affordableWithTrades(you.hand, you.bankRatio, claim.cost);
+            raceLost = !finishNow;
+          }
+        }
+      }
+      // Winning the race outright makes plain-surplus extension safe (nothing
+      // to telegraph); otherwise claims still demand 7-pressure discipline.
+      const worthExtending =
+        ((claim ? nearLimit && claimStuck : surplus || nearLimit) ||
+          (winningRace && surplus)) &&
+        !raceLost;
       if (hasPiece("settlement") && worthExtending) {
         return {
           kind: "build-road",
           coord,
           describe: `development road toward spot ① (${len} road${len > 1 ? "s" : ""} away)`,
         };
+      }
+      if (raceLost && hasPiece("settlement") && (surplus || nearLimit)) {
+        return null; // explicitly hold: roads are not donations to a lost race
       }
     }
     return null;
@@ -918,7 +999,10 @@ export function decideNext(opts: {
   const winTarget = opts.winTarget ?? 10;
   // our true score: public VP + the VP cards in hand (exact from card ids)
   const myVp = visibleVp(you) + (opts.vpCardsHeld ?? 0);
-  const growthPhase = canExpandMore && myVp < winTarget - 2;
+  // Lotto override: when we're far behind, dev cards ARE the comeback — each
+  // one is a lottery ticket (VP card, knights -> army) — so they stay in the
+  // plan even while the board is still small.
+  const growthPhase = canExpandMore && myVp < winTarget - 2 && riskMode !== "lotto";
   // Post-growth (>= target-2, i.e. endgame): a settlement is a GUARANTEED point
   // for 4 cards while a dev card averages well under half a point (log game:
   // at 8 VP the bot sat on 11 cards buying dev cards and lost by one build).
@@ -1155,7 +1239,11 @@ export function decideNext(opts: {
   // disproportionately likely next. Only if there's a buildable target in
   // the strategy order.
   const sevenDue = p7next >= base7 * 1.25;
-  if (handSize >= limit - (sevenDue ? 3 : 2) && allowed("bank-trade")) {
+  // Protect mode: when comfortably ahead, start shedding a full 3 cards
+  // before the limit even without a due 7 — the lead is worth more than the
+  // marginal cards, and a 7 must never be able to take it.
+  const dumpDist = riskMode === "protect" ? 3 : sevenDue ? 3 : 2;
+  if (handSize >= limit - dumpDist && allowed("bank-trade")) {
     const trade = tradeSurplusToAvoidDiscard(
       you.hand,
       you.bankRatio,
@@ -1163,6 +1251,7 @@ export function decideNext(opts: {
       limit,
       order,
       fundingTarget,
+      dumpDist,
     );
     if (trade) {
       return {
@@ -1181,7 +1270,7 @@ export function decideNext(opts: {
   if (
     oppDevInference.likelyMonopoly &&
     oppDevInference.confidence >= 0.5 &&
-    handSize < limit - (sevenDue ? 3 : 2) &&
+    handSize < limit - dumpDist &&
     allowed("bank-trade")
   ) {
     const fat = [...RESOURCES].sort((a, b) => you.hand[b] - you.hand[a])[0];

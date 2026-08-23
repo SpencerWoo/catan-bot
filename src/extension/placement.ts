@@ -46,6 +46,40 @@ export interface PlacementAdvice {
   /** full road-path length to spot ① (roadEdges is trimmed to the next two) */
   roadPathLength?: number;
   note: string | null;
+  /**
+   * Race to spot ① vs the closest opponent (main phase only). A "tied" race
+   * counts as lost for commitment purposes: equal distance but they may hold
+   * tempo and roads-in-hand beat ours.
+   */
+  race?: { losing: boolean; tied: boolean; ourLen: number; oppLen: number | null };
+}
+
+/**
+ * Road-race analysis for a target vertex: how many roads WE need from our
+ * network vs how many the CLOSEST opponent needs (paths respect blocked
+ * vertices and existing roads). The opponent being strictly closer — or even
+ * equal — makes a multi-road commitment there a donation.
+ */
+export function spotContest(
+  state: GameState,
+  youPlayer: PlayerId,
+  vertexId: number,
+): { losing: boolean; tied: boolean; ourLen: number; oppLen: number | null } {
+  const ourPath = roadPathTo(state, youPlayer, vertexId);
+  const ourLen = ourPath.length;
+  const opponents = new Set(
+    state.buildings.map((b) => b.player).filter((p) => p !== youPlayer),
+  );
+  let oppLen: number | null = null;
+  for (const op of opponents) {
+    const path = roadPathTo(state, op, vertexId);
+    if (path.length === 0) continue;
+    if (oppLen === null || path.length < oppLen) oppLen = path.length;
+  }
+  if (oppLen === null || ourPath.length === 0) {
+    return { losing: false, tied: false, ourLen, oppLen };
+  }
+  return { losing: oppLen < ourLen, tied: oppLen === ourLen, ourLen, oppLen };
 }
 
 export function describeVertex(state: GameState, vertexId: number): string {
@@ -215,7 +249,7 @@ export function rankSetupSpots(
       // The sqrt utility alone still let a 5-pip ore addition beat a first brick
       // pip. A core resource we'd otherwise never produce is worth ~2.5 pips.
       const coverageBonus = covers.reduce((acc, r) => acc + (r === "sheep" ? 1.0 : 2.5), 0);
-      const score = utility * 3 + portBonus + coverageBonus; // ×3 puts it on scoreVertex's pip-ish scale
+      let score = utility * 3 + portBonus + coverageBonus; // ×3 puts it on scoreVertex's pip-ish scale
       const notes = [...base.notes];
 
       // concentration check with this candidate merged into the network
@@ -427,12 +461,31 @@ export function advisePlacement(
   let roadEdges: number[] = [];
   let roadPathLength = 0;
   let note: string | null = null;
+  let race: PlacementAdvice["race"] | undefined;
   if (spots.length > 0) {
     const path = roadPathTo(state, youPlayer, spots[0].vertexId);
     roadEdges = path.slice(0, 2);
     roadPathLength = path.length;
     if (path.length > 0) {
       note = `${path.length} road${path.length > 1 ? "s" : ""} to reach spot ①${path.length > 2 ? " — dashed segments are the next two" : ""}.`;
+    }
+    // Race check: flag spots the closest opponent reaches as fast or faster.
+    // Committing roads to a lost race is the classic early-game donation.
+    for (const s of spots) {
+      const c = spotContest(state, youPlayer, s.vertexId);
+      if (c.oppLen !== null && c.ourLen > 0 && (c.losing || c.tied)) {
+        const gap = c.ourLen - (c.oppLen ?? 0);
+        s.label += c.losing
+          ? ` ⚠ race LOST by ${gap} road${gap === 1 ? "" : "s"} — they get there first`
+          : ` ⚠ tied race (${c.oppLen} roads each) — risky to commit`;
+      }
+    }
+    const c0 = spotContest(state, youPlayer, spots[0].vertexId);
+    if (c0.oppLen !== null) {
+      race = { losing: c0.losing, tied: c0.tied, ourLen: c0.ourLen, oppLen: c0.oppLen };
+      if ((c0.losing || c0.tied) && c0.ourLen > 0) {
+        note = `${note ? note + " " : ""}⚠ Spot ① is contested: opponent needs ${c0.oppLen} road${c0.oppLen === 1 ? "" : "s"} vs our ${c0.ourLen}.`;
+      }
     }
   }
   return {
@@ -442,6 +495,7 @@ export function advisePlacement(
     roadEdges,
     roadPathLength,
     note,
+    race,
   };
 }
 
