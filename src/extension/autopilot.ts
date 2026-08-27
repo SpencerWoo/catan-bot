@@ -264,34 +264,38 @@ export function tradeSurplusToAvoidDiscard(
   const total = RESOURCES.reduce((s, r) => s + hand[r], 0);
   if (total < limit - dist) return null; // not close enough to limit to worry
 
-  // Only act if there's at least one buildable SPATIAL target (not just dev cards)
+  // Find the first buildable spatial target and treat the gap as the need:
+  // trade toward what we actually want to build, not abstract strategy weight.
   const spatialItems: Array<keyof typeof BUILD_COSTS> = ["settlement", "city", "road"];
-  const hasBuildableSpatialTarget = order.some(
-    (item) => spatialItems.includes(item) && fundingTarget(item) !== null,
-  );
-  if (!hasBuildableSpatialTarget) return null;
+  let need: Resource | null = null;
+  let needGap = 0;
+  for (const item of order) {
+    if (!spatialItems.includes(item)) continue;
+    const cost = fundingTarget(item);
+    if (!cost) continue;
+    for (const r of RESOURCES) {
+      const gap = (cost[r] ?? 0) - hand[r];
+      if (gap > needGap) {
+        needGap = gap;
+        need = r;
+      }
+    }
+    if (need) break; // use the first buildable target's biggest gap
+  }
+  // No buildable spatial target → nothing to trade toward, hold the hand.
+  // The old weight-based fallback produced spurious trades (e.g. dumping wood
+  // for brick when there's no settlement to place or city to upgrade).
+  if (!need) return null;
 
-  // Find surplus resources (>= ratio for port/bank)
+  // Pick the surplus with the best ratio (highest bank rate first) that isn't
+  // the need resource — shed the most cards per trade to reduce 7 risk.
   const surpluses: Array<{ resource: Resource; count: number; ratio: number }> = [];
   for (const r of RESOURCES) {
     const ratio = ratios[r] ?? 4;
-    if (hand[r] >= ratio) surpluses.push({ resource: r, count: hand[r], ratio });
+    if (hand[r] >= ratio && r !== need) surpluses.push({ resource: r, count: hand[r], ratio });
   }
   if (surpluses.length === 0) return null;
 
-  // Most needed resource by strategy weight that we have < target
-  let need: Resource | null = null;
-  let needScore = -Infinity;
-  for (const r of RESOURCES) {
-    const score = weights[r] - hand[r] * 0.3; // high weight, low count = most needed
-    if (score > needScore) {
-      needScore = score;
-      need = r;
-    }
-  }
-  if (!need) return null;
-
-  // Pick the surplus with best (lowest) ratio, then least-valued by strategy
   surpluses.sort((a, b) =>
     a.ratio - b.ratio || weights[a.resource] - weights[b.resource],
   );
@@ -718,6 +722,13 @@ export function decideNext(opts: {
     // Don't waste a knight if an opponent is already blocked — save it for when you're blocked
     if (opponentBlocked && !blockedMine) return null;
 
+    // Aggressive LA chase: 3+ held dev cards almost certainly include knights
+    // (deck is 14 knights / 21 total). Play them every turn to build the
+    // army — you need 3 separate turns to play them all, so delay wastes
+    // the LA timeline. Only hoard when you have 1-2 left (robber utility).
+    const unplayedDev = you.devCards - you.knightsPlayed;
+    if (unplayedDev >= 3) return "3+ held dev cards — play knights to chase Largest Army";
+
     // Largest Army logic: only chase it if it's DECISIVE for the win.
     // 1. You need it to win (close to 10 VP, +2 from LA would win).
     // 2. You must PREVENT opponent from winning with it (they're close to 10 and have/near LA).
@@ -1143,7 +1154,11 @@ export function decideNext(opts: {
     if (robberOnMine && !opts.knightAvailable) {
       return { kind: "buy-dev", describe: "buy a development card (robber on our tile, no knight in hand)" };
     }
-    if (!reachable) {
+    // Protect mode: when comfortably ahead we shed surplus toward the next
+    // build (surplus-dump below) rather than swap 3 cards for a dev — the
+    // dump runs at a 3-card buffer and never gives up the lead. A dev buy
+    // here (b) would only be reachable-hiding; the dump handles the hand.
+    if (!reachable && riskMode !== "protect") {
       return { kind: "buy-dev", describe: "buy a development card (nothing else reachable)" };
     }
   }

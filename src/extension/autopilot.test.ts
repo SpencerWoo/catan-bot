@@ -1565,6 +1565,46 @@ describe("autopilot decisions", () => {
     expect(decideNext({ ...base, fit: fits[0] })?.kind).not.toBe("play-knight");
   });
 
+  it("plays knights aggressively when holding 3+ unplayed dev cards", () => {
+    const t = trackerWith({});
+    applyEvent(t, { type: "place", player: "Ava", color: "#E27174", what: "settlement" });
+    const you = t.players.get("Nick")!;
+    you.devCards = 4;
+    you.knightsPlayed = 0; // 4 unplayed dev cards → play aggressively
+    const fits = rankLiveStrategies(t, "Nick");
+    const base = {
+      tracker: t,
+      youName: "Nick",
+      gs: gsWithSettlement(),
+      advice: null,
+      rolledThisTurn: true,
+      robberHex: { x: 99, y: 99 },
+      knightAvailable: true,
+    };
+    const d = decideNext({ ...base, fit: fits[0] });
+    expect(d?.kind).toBe("play-knight");
+    expect(d?.describe).toMatch(/3\+ held dev/i);
+  });
+
+  it("saves the last 1-2 knights for blocking utility", () => {
+    const t = trackerWith({});
+    applyEvent(t, { type: "place", player: "Ava", color: "#E27174", what: "settlement" });
+    const you = t.players.get("Nick")!;
+    you.devCards = 2;
+    you.knightsPlayed = 0; // only2 → save for blocking
+    const fits = rankLiveStrategies(t, "Nick");
+    const base = {
+      tracker: t,
+      youName: "Nick",
+      gs: gsWithSettlement(),
+      advice: null,
+      rolledThisTurn: true,
+      robberHex: { x: 99, y: 99 },
+      knightAvailable: true,
+    };
+    expect(decideNext({ ...base, fit: fits[0] })?.kind).not.toBe("play-knight");
+  });
+
   it("executor plays a learned knight once per turn and not the turn it's bought", () => {
     localStorage.clear();
     const learner = new ProtocolLearner();

@@ -2210,26 +2210,28 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
     const total = RESOURCES.reduce((s, r) => s + hand[r], 0);
     if (total < limit - dist) return null;
     const spatialItems = ["settlement", "city", "road"];
-    const hasBuildableSpatialTarget = order.some(
-      (item) => spatialItems.includes(item) && fundingTarget(item) !== null
-    );
-    if (!hasBuildableSpatialTarget) return null;
+    let need = null;
+    let needGap = 0;
+    for (const item of order) {
+      if (!spatialItems.includes(item)) continue;
+      const cost = fundingTarget(item);
+      if (!cost) continue;
+      for (const r of RESOURCES) {
+        const gap = (cost[r] ?? 0) - hand[r];
+        if (gap > needGap) {
+          needGap = gap;
+          need = r;
+        }
+      }
+      if (need) break;
+    }
+    if (!need) return null;
     const surpluses = [];
     for (const r of RESOURCES) {
       const ratio2 = ratios[r] ?? 4;
-      if (hand[r] >= ratio2) surpluses.push({ resource: r, count: hand[r], ratio: ratio2 });
+      if (hand[r] >= ratio2 && r !== need) surpluses.push({ resource: r, count: hand[r], ratio: ratio2 });
     }
     if (surpluses.length === 0) return null;
-    let need = null;
-    let needScore = -Infinity;
-    for (const r of RESOURCES) {
-      const score = weights[r] - hand[r] * 0.3;
-      if (score > needScore) {
-        needScore = score;
-        need = r;
-      }
-    }
-    if (!need) return null;
     surpluses.sort(
       (a, b) => a.ratio - b.ratio || weights[a.resource] - weights[b.resource]
     );
@@ -2487,6 +2489,8 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
       );
       if (blockedMine) return "the robber is on your tile";
       if (opponentBlocked && !blockedMine) return null;
+      const unplayedDev = you.devCards - you.knightsPlayed;
+      if (unplayedDev >= 3) return "3+ held dev cards — play knights to chase Largest Army";
       const myKnights = you.knightsPlayed;
       const myVp2 = visibleVp(you);
       const oppMaxKnights = Math.max(
@@ -2732,7 +2736,7 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
       if (robberOnMine && !opts.knightAvailable) {
         return { kind: "buy-dev", describe: "buy a development card (robber on our tile, no knight in hand)" };
       }
-      if (!reachable) {
+      if (!reachable && riskMode !== "protect") {
         return { kind: "buy-dev", describe: "buy a development card (nothing else reachable)" };
       }
     }
