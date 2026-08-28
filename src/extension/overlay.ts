@@ -18,11 +18,12 @@ import { TrackerState, handTotal, visibleVp } from "./tracker";
 import {
   PlacementAdvice,
   advisePlacement,
+  colonistIdForColor,
   placementFacts,
   renderMiniMap,
 } from "./placement";
 import { Board, GameState, PlayerId } from "../engine/types";
-import { AutopilotView } from "./autopilot";
+import { AutopilotView, estimateWinProbability, opponentStarveResource, riskModeOf } from "./autopilot";
 import { RushView } from "./rush/rushPilot";
 import { VictoryPlan } from "../engine/winnability";
 import { RushPref } from "./rush/rushMode";
@@ -35,6 +36,7 @@ export interface BoardView {
   toGameState(): { state: GameState; youPlayer: PlayerId | null } | null;
   buildings: Array<{ vertexId: number; colorId: number; kind: "settlement" | "city" }>;
   roads: Array<{ edgeId: number; colorId: number }>;
+  robberHex?: { x: number; y: number } | null;
 }
 
 /* Palette validated with the dataviz six-checks validator in both modes
@@ -61,16 +63,17 @@ const CSS = `
     --desert: #55503e; --gold: #d4a017;
   }
 }
-/* Docked: a full-height column on the right edge; the page is narrowed by
+/* Docked: a full-height column on the left edge; the page is narrowed by
    the same width (html.cc-docked-page) so the game sits BESIDE the panel
    instead of underneath it. */
 #catan-copilot.cc-docked {
-  top: 0 !important; right: 0 !important; left: auto !important; bottom: 0;
+  top: 0 !important; left: 0 !important; right: auto !important; bottom: 0;
   width: var(--cc-dock-w); height: 100vh; max-height: 100vh;
-  border-radius: 0; border-width: 0 0 0 1px; box-shadow: -4px 0 18px rgba(0,0,0,.18);
+  border-radius: 0; border-width: 0 1px 0 0; box-shadow: 4px 0 18px rgba(0,0,0,.18);
 }
 #catan-copilot.cc-docked header { cursor: default; }
 html.cc-docked-page {
+  margin-left: var(--cc-dock-w) !important;
   width: calc(100% - var(--cc-dock-w)) !important;
   overflow-x: hidden;
 }
@@ -96,6 +99,20 @@ html.cc-docked-page {
 #catan-copilot h4:first-child { margin-top: 0; }
 #catan-copilot .cc-note { color: var(--ink-2); margin: 3px 0; }
 #catan-copilot .cc-muted { color: var(--ink-3); }
+#catan-copilot .cc-eval { display: flex; align-items: center; gap: 6px; margin: 4px 0; }
+#catan-copilot .cc-eval-you, #catan-copilot .cc-eval-opp {
+  font-size: 12px; font-weight: 700; min-width: 34px; text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+#catan-copilot .cc-eval-you { color: var(--accent); }
+#catan-copilot .cc-eval-opp { color: var(--brick); }
+#catan-copilot .cc-eval-bar {
+  flex: 1; height: 10px; border-radius: 5px; overflow: hidden;
+  background: color-mix(in srgb, var(--brick) 35%, transparent);
+  border: 1px solid var(--hairline);
+}
+#catan-copilot .cc-eval-fill { height: 100%; background: var(--bar); transition: width .3s; }
+#catan-copilot ul.cc-eval-why { margin: 2px 0 6px 16px; padding: 0; }
 #catan-copilot .cc-deck { display: grid; grid-template-columns: repeat(11, 1fr); gap: 3px; align-items: end; }
 #catan-copilot .cc-deck .col { text-align: center; }
 #catan-copilot .cc-deck .bar {
@@ -477,6 +494,10 @@ export class Overlay {
         ? rankLiveStrategies(state, you, strategyPriors(loadRecords()))
         : [];
 
+    // Position eval (chess-style): who is ahead and why, recomputed every turn.
+    const evalHtml = this.renderEval(state, bridge ?? null);
+    if (evalHtml) parts.push(evalHtml);
+
     if (you && fits.length > 0) {
       let facts: PlacementFacts | null = null;
       if (gs && gs.youPlayer !== null) {
@@ -520,7 +541,9 @@ export class Overlay {
     }
 
     parts.push(this.renderHistory());
-    parts.push(this.renderAutopilot());
+    // Autopilot goes at the TOP (below any reload/game-over notice): the
+    // play-for-me switch is the most-used control.
+    parts.unshift(this.renderAutopilot());
     this.body.innerHTML = parts.join("");
   }
 
@@ -643,6 +666,67 @@ export class Overlay {
       )
       .join("");
     return `<div class="cc-card rec"><div class="t"><span>Your move</span></div>${items}</div>`;
+  }
+
+  /**
+   * Chess-style position eval, recomputed on every render: win-probability
+   * bar (us vs them) from visible VP, production, inferred opponent hand +
+   * dev cards, and the top drivers as one-liners.
+   */
+  private renderEval(state: TrackerState, bridge: BoardView | null): string {
+    if (!state.youName || state.gameOver || state.rolls.length === 0) return "";
+    const you = state.players.get(state.youName);
+    const opponents = [...state.players.values()].filter((p) => p.name !== state.youName);
+    if (!you || opponents.length === 0) return "";
+    const opp = opponents.reduce((a, b) => (visibleVp(b) > visibleVp(a) ? b : a), opponents[0]);
+    let gs: { state: GameState; youPlayer: PlayerId | null } | null = null;
+    try {
+      gs = bridge?.toGameState() ?? null;
+    } catch {
+      return "";
+    }
+    const board = gs?.state.board ?? null;
+    const wp = estimateWinProbability(
+      you,
+      opp,
+      state,
+      board,
+      bridge?.robberHex ?? null,
+      gs?.state.buildings ?? null,
+    );
+    const pct = Math.round(Math.min(0.95, Math.max(0.05, wp.probability)) * 100);
+    const sign = wp.probability >= 0.5 ? "+" : "−";
+    const ev = (Math.abs(wp.probability - 0.5) * 2).toFixed(1);
+    const mode = riskModeOf(wp.probability);
+    const verdict =
+      mode === "protect"
+        ? "You're ahead — protecting the lead"
+        : mode === "lotto"
+          ? "You're behind — playing for variance"
+          : "Even game";
+    const drivers = [...wp.reasoning];
+    if (mode === "lotto") drivers.push("Behind: dev cards stay in the plan — each is a comeback ticket.");
+    if (mode === "protect") drivers.push("Ahead: hands dump 3 cards before the limit so a 7 can't bite.");
+    const starve = ((): string | null => {
+      if (!gs || gs.youPlayer === null || !opp) return null;
+      const oppId = opp.playerId ?? colonistIdForColor(opp.color);
+      if (oppId === null) return null;
+      const r = opponentStarveResource(gs.state, oppId as PlayerId);
+      return r ? `They're thinnest on ${r} — robber on ${r} tiles hurts them most.` : null;
+    })();
+    if (starve) drivers.push(starve);
+    const driverHtml = drivers
+      .slice(0, 4)
+      .map((r) => `<li>${esc(r)}</li>`)
+      .join("");
+    return `
+      <h4>Eval ${sign}${ev} — ${verdict}</h4>
+      <div class="cc-eval" title="Win probability estimate">
+        <span class="cc-eval-you">${pct}%</span>
+        <div class="cc-eval-bar"><div class="cc-eval-fill" style="width:${pct}%"></div></div>
+        <span class="cc-eval-opp">${100 - pct}%</span>
+      </div>
+      ${driverHtml ? `<ul class="cc-note cc-muted cc-eval-why">${driverHtml}</ul>` : ""}`;
   }
 
   private renderWhereToBuild(

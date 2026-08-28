@@ -6,6 +6,18 @@ import { PlayerState, TrackerState, handTotal, visibleVp } from "./tracker";
 
 // ---------------------------------------------------------------- dice deck
 
+/**
+ * Colonist.io's balanced dice draws WITHOUT replacement from the 36 two-die
+ * combinations, but refills+reshuffles while a few cards are still unplayed
+ * (modeled as discardAt = 4 in engine/simulate.ts). Consequences:
+ *  - Mid-shoe, deficits are exploitable: a number that has appeared its full
+ *    count cannot come up again until the refill.
+ *  - Near the bottom of the shoe (totalRemaining <= SHOE_REFILL_BELOW) the
+ *    refill may already have happened — treating a cold number as probability
+ *    ZERO is overconfident and wrong. We snap to a fresh-shoe view instead.
+ */
+const SHOE_REFILL_BELOW = 5;
+
 export interface DeckStatus {
   /** cards left in the assumed deck for each total 2..12 */
   remaining: Map<number, number>;
@@ -20,12 +32,24 @@ export interface DeckStatus {
 }
 
 export function deckStatus(state: TrackerState): DeckStatus {
+  const full = new Map<number, number>();
   const remaining = new Map<number, number>();
-  for (let n = 2; n <= 12; n++) remaining.set(n, n === 7 ? 6 : pips(n));
+  for (let n = 2; n <= 12; n++) {
+    full.set(n, n === 7 ? 6 : pips(n));
+    remaining.set(n, n === 7 ? 6 : pips(n));
+  }
   for (const roll of state.rollsThisDeck) {
     remaining.set(roll, Math.max(0, (remaining.get(roll) ?? 0) - 1));
   }
-  const totalRemaining = [...remaining.values()].reduce((a, b) => a + b, 0);
+  let totalRemaining = [...remaining.values()].reduce((a, b) => a + b, 0);
+  // Thin-shoe correction: colonist reshuffles BEFORE the shoe empties, so a
+  // nearly-empty count means the refill has likely already happened — every
+  // number is back in play. (The tracker's own DECK_CYCLE reset approximates
+  // the same boundary; this guards the drift when counting started mid-shoe.)
+  if (totalRemaining <= SHOE_REFILL_BELOW) {
+    for (let n = 2; n <= 12; n++) remaining.set(n, full.get(n)!);
+    totalRemaining = 36;
+  }
   const prob = new Map<number, number>();
   const due: number[] = [];
   const cold: number[] = [];
@@ -277,14 +301,21 @@ export function robberAdvice(state: TrackerState): RobberAdvice | null {
 
   // Block the number that feeds what their game plan NEEDS, not just their
   // biggest raw earner: weight each number's payout by their best-fit
-  // strategy's resource weights.
+  // strategy's resource weights, scaled by how likely the balanced-dice shoe
+  // is to roll that number NEXT (blocking a due 9 beats a cold 6).
   const needs = bestFitWeights(p);
+  const deck = deckStatus(state);
+  const dueNess = (n: number): number => {
+    const base = pips(n) / 36;
+    if (base <= 0) return 1;
+    return Math.min(2, Math.max(0.25, (deck.prob.get(n) ?? base) / base));
+  };
   const yourIncome = you ? state.players.get(you)?.incomeByNumber : undefined;
   let best: { n: number; value: number } | null = null;
   for (const [n, delta] of p.incomeByNumber) {
     let value = 0;
     for (const [res, count] of Object.entries(delta)) {
-      value += (count ?? 0) * pips(n) * needs[res as Resource];
+      value += (count ?? 0) * pips(n) * needs[res as Resource] * dueNess(n);
     }
     if (yourIncome?.has(n)) value *= 0.5; // that tile may pay you too
     if (!best || value > best.value) best = { n, value };
@@ -296,7 +327,10 @@ export function robberAdvice(state: TrackerState): RobberAdvice | null {
     const alsoYours = yourIncome?.has(best.n)
       ? " (careful: a tile on that number may pay you too)"
       : "";
-    blockHint = ` Block their ${best.n} — it pays them ${payout}, which their plan needs most${alsoYours}.`;
+    const hot =
+      dueNess(best.n) >= 1.35 ? " — it's over-due in the dice shoe right now" :
+      dueNess(best.n) <= 0.75 ? " (though the shoe says it's cold)" : "";
+    blockHint = ` Block their ${best.n} — it pays them ${payout}, which their plan needs most${hot}${alsoYours}.`;
   }
   const friendly =
     visibleVp(p) < 3

@@ -78,6 +78,7 @@ export function scoreVertex(
   const notes: string[] = [];
   const resources: Resource[] = [];
   const pipsByKind: Partial<Record<Resource, number>> = {};
+  const pipsByToken = new Map<number, number[]>();
   let score = 0;
   let totalPips = 0;
 
@@ -88,6 +89,7 @@ export function scoreVertex(
     totalPips += p;
     score += p * weights[h.kind];
     pipsByKind[h.kind] = (pipsByKind[h.kind] ?? 0) + p;
+    pipsByToken.set(h.token, [...(pipsByToken.get(h.token) ?? []), p]);
     if (!resources.includes(h.kind)) resources.push(h.kind);
   }
 
@@ -95,6 +97,21 @@ export function scoreVertex(
   // of the same pip count (fewer dead rolls, easier building costs).
   score += (resources.length - 1) * 1.2;
   if (resources.length >= 3) notes.push("3-resource diversity");
+
+  // Number-token diversity: hexes sharing a token pay out together or not at
+  // all (streaky income), and ONE robber placement blocks all of them. Penalize
+  // duplicated tokens by the pips of all but the biggest hex on that token.
+  let dupPips = 0;
+  for (const shares of pipsByToken.values()) {
+    if (shares.length > 1) {
+      const max = Math.max(...shares);
+      dupPips += shares.reduce((s, p) => s + p, 0) - max;
+    }
+  }
+  if (dupPips > 0) {
+    score -= dupPips * 0.35;
+    notes.push(`shared number token (-${(dupPips * 0.35).toFixed(1)})`);
+  }
 
   if (v.port) {
     // Ports ARE the trade economy in 1v1 (no player trades): game logs show

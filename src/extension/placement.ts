@@ -22,6 +22,15 @@ export const COLONIST_COLORS: Record<number, string> = {
   8: "#8B5A2B",
 };
 
+/** Reverse lookup: colonist player id for a hex color, or null if unknown. */
+export function colonistIdForColor(color: string): number | null {
+  const want = color.toLowerCase();
+  for (const [id, c] of Object.entries(COLONIST_COLORS)) {
+    if (c.toLowerCase() === want) return Number(id);
+  }
+  return null;
+}
+
 export interface SpotAdvice {
   vertexId: number;
   rank: number;
@@ -37,6 +46,40 @@ export interface PlacementAdvice {
   /** full road-path length to spot ① (roadEdges is trimmed to the next two) */
   roadPathLength?: number;
   note: string | null;
+  /**
+   * Race to spot ① vs the closest opponent (main phase only). A "tied" race
+   * counts as lost for commitment purposes: equal distance but they may hold
+   * tempo and roads-in-hand beat ours.
+   */
+  race?: { losing: boolean; tied: boolean; ourLen: number; oppLen: number | null };
+}
+
+/**
+ * Road-race analysis for a target vertex: how many roads WE need from our
+ * network vs how many the CLOSEST opponent needs (paths respect blocked
+ * vertices and existing roads). The opponent being strictly closer — or even
+ * equal — makes a multi-road commitment there a donation.
+ */
+export function spotContest(
+  state: GameState,
+  youPlayer: PlayerId,
+  vertexId: number,
+): { losing: boolean; tied: boolean; ourLen: number; oppLen: number | null } {
+  const ourPath = roadPathTo(state, youPlayer, vertexId);
+  const ourLen = ourPath.length;
+  const opponents = new Set(
+    state.buildings.map((b) => b.player).filter((p) => p !== youPlayer),
+  );
+  let oppLen: number | null = null;
+  for (const op of opponents) {
+    const path = roadPathTo(state, op, vertexId);
+    if (path.length === 0) continue;
+    if (oppLen === null || path.length < oppLen) oppLen = path.length;
+  }
+  if (oppLen === null || ourPath.length === 0) {
+    return { losing: false, tied: false, ourLen, oppLen };
+  }
+  return { losing: oppLen < ourLen, tied: oppLen === ourLen, ourLen, oppLen };
 }
 
 export function describeVertex(state: GameState, vertexId: number): string {
@@ -139,6 +182,26 @@ export function placementWeights(board: Board): Record<Resource, number> {
 // ore-light) — value ore/wheat coverage above wood/brick, sheep least.
 const SETUP_NEED: Record<Resource, number> = { wheat: 1.3, ore: 1.35, wood: 0.95, brick: 0.95, sheep: 0.8 };
 
+/**
+ * Opening-hand value of a payout (1 card per adjacent hex): early roads eat
+ * brick+wood, wheat starts cities/dev buys, ore is the slowest opener.
+ */
+const OPENING_NEED: Record<Resource, number> = { brick: 1.3, wood: 1.2, wheat: 1.15, sheep: 0.8, ore: 0.75 };
+
+/** The starting resources a settlement would collect: one per adjacent non-desert hex. */
+export function startingResourcesFor(state: GameState, vertexId: number): Record<Resource, number> {
+  const out = Object.fromEntries(RESOURCES.map((r) => [r, 0])) as Record<Resource, number>;
+  for (const hid of state.board.vertices[vertexId].hexIds) {
+    const h = state.board.hexes[hid];
+    if (h.kind !== "desert") out[h.kind] += 1;
+  }
+  return out;
+}
+
+export function openingValue(res: Record<Resource, number>): number {
+  return RESOURCES.reduce((s, r) => s + res[r] * OPENING_NEED[r], 0);
+}
+
 export function rankSetupSpots(
   state: GameState,
   youPlayer: PlayerId,
@@ -146,15 +209,31 @@ export function rankSetupSpots(
   limit = 3,
 ) {
   const existing = playerProduction(state, youPlayer); // cards/roll
+  // Robber-vulnerability: pips grouped by NUMBER TOKEN across the whole
+  // network. If most of your income rides on one token, a single robber
+  // placement shuts your economy down — candidates that push the top-token
+  // share higher get penalized.
+  const netPipsByToken = new Map<number, number>();
+  const haveBuildings = state.buildings.some((b) => b.player === youPlayer);
+  for (const b of state.buildings) {
+    if (b.player !== youPlayer) continue;
+    for (const hid of state.board.vertices[b.vertexId].hexIds) {
+      const h = state.board.hexes[hid];
+      if (h.kind === "desert" || h.token === null) continue;
+      netPipsByToken.set(h.token, (netPipsByToken.get(h.token) ?? 0) + pips(h.token));
+    }
+  }
   const scored = state.board.vertices
     .filter((v) => isVertexBuildable(state, v.id))
     .map((v) => {
       const base = scoreVertex(state.board, v.id, weights);
       const add: Partial<Record<Resource, number>> = {};
+      const addByToken = new Map<number, number>();
       for (const hid of v.hexIds) {
         const h = state.board.hexes[hid];
         if (h.kind === "desert" || h.token === null) continue;
         add[h.kind] = (add[h.kind] ?? 0) + pips(h.token);
+        addByToken.set(h.token, (addByToken.get(h.token) ?? 0) + pips(h.token));
       }
       let utility = 0;
       for (const r of RESOURCES) {
@@ -170,8 +249,33 @@ export function rankSetupSpots(
       // The sqrt utility alone still let a 5-pip ore addition beat a first brick
       // pip. A core resource we'd otherwise never produce is worth ~2.5 pips.
       const coverageBonus = covers.reduce((acc, r) => acc + (r === "sheep" ? 1.0 : 2.5), 0);
-      const score = utility * 3 + portBonus + coverageBonus; // ×3 puts it on scoreVertex's pip-ish scale
+      let score = utility * 3 + portBonus + coverageBonus; // ×3 puts it on scoreVertex's pip-ish scale
       const notes = [...base.notes];
+
+      // concentration check with this candidate merged into the network
+      if (haveBuildings && addByToken.size > 0) {
+        const merged = new Map(netPipsByToken);
+        let total = 0;
+        for (const n of merged.values()) total += n;
+        for (const [tok, n] of addByToken) {
+          merged.set(tok, (merged.get(tok) ?? 0) + n);
+          total += n;
+        }
+        let topShare = 0;
+        let topToken = 0;
+        for (const [tok, n] of merged) {
+          if (n / total > topShare) {
+            topShare = n / total;
+            topToken = tok;
+          }
+        }
+        if (topShare > 0.55) {
+          const penalty = (topShare - 0.55) * 12;
+          score -= penalty;
+          notes.push(`robber-vulnerable: ${(topShare * 100).toFixed(0)}% of pips on the ${topToken}`);
+        }
+      }
+
       if (covers.length && state.buildings.some((b) => b.player === youPlayer)) notes.push(`adds ${covers.join("+")} you lack`);
       return { ...base, score, notes };
     })
@@ -263,6 +367,55 @@ export function advisePlacement(
       if (missing.length) note = `Your first spot lacks ${missing.join(", ")} — these picks weigh that heavily.`;
     }
     const top = rankSetupSpots(state, youPlayer, base, 3);
+
+    // Second-player doubling (1v1 snake draft: opp → you → YOU → opp): your
+    // two placements are back-to-back, so both spots are safe once you start,
+    // and ONLY the second one collects starting resources. Plan the pair:
+    // take the best two spots overall, placing the one with the WEAKER
+    // opening payout first — the stronger payout lands on the paying pick.
+    const mineCount = yourBuildings.length;
+    const oppCount = state.buildings.length - mineCount;
+    if (mineCount === 0 && oppCount === 1) {
+      const pool = rankSetupSpots(state, youPlayer, base, 6);
+      let bestPair: { first: (typeof pool)[number]; second: (typeof pool)[number]; score: number } | null = null;
+      for (let i = 0; i < pool.length; i++) {
+        for (let j = i + 1; j < pool.length; j++) {
+          const combined = pool[i].score + pool[j].score;
+          if (!bestPair || combined > bestPair.score) {
+            bestPair = { first: pool[i], second: pool[j], score: combined };
+          }
+        }
+      }
+      if (bestPair) {
+        const openFirst = openingValue(startingResourcesFor(state, bestPair.first.vertexId));
+        const openSecond = openingValue(startingResourcesFor(state, bestPair.second.vertexId));
+        const paysFirst = openFirst > openSecond; // the WEAKER payout goes first
+        const nowSpot = paysFirst ? bestPair.second : bestPair.first;
+        const paySpot = paysFirst ? bestPair.first : bestPair.second;
+        return {
+          phase: "setup",
+          heading: "You place TWICE in a row — plan the pair",
+          spots: [
+            {
+              vertexId: nowSpot.vertexId,
+              rank: 1,
+              label: `${describeVertex(state, nowSpot.vertexId)} — place NOW (this one won't collect resources)`,
+            },
+            {
+              vertexId: paySpot.vertexId,
+              rank: 2,
+              label: `${describeVertex(state, paySpot.vertexId)} — place SECOND (this one pays the starting hand)`,
+            },
+          ],
+          roadEdges: [],
+          note: "Going second, your two placements are back-to-back — nothing can be taken in between. Only the 2nd collects resources, so the weaker-opening corner goes first.",
+        };
+      }
+    }
+    if (mineCount === 1 && oppCount === 1) {
+      note = `${note ? note + " " : ""}This placement COLLECTS the starting resources — weight wood/brick/wheat adjacency.`;
+    }
+
     return {
       phase: "setup",
       heading: yourBuildings.length === 0 ? "Place your 1st settlement here" : "Place your 2nd settlement here",
@@ -308,12 +461,31 @@ export function advisePlacement(
   let roadEdges: number[] = [];
   let roadPathLength = 0;
   let note: string | null = null;
+  let race: PlacementAdvice["race"] | undefined;
   if (spots.length > 0) {
     const path = roadPathTo(state, youPlayer, spots[0].vertexId);
     roadEdges = path.slice(0, 2);
     roadPathLength = path.length;
     if (path.length > 0) {
       note = `${path.length} road${path.length > 1 ? "s" : ""} to reach spot ①${path.length > 2 ? " — dashed segments are the next two" : ""}.`;
+    }
+    // Race check: flag spots the closest opponent reaches as fast or faster.
+    // Committing roads to a lost race is the classic early-game donation.
+    for (const s of spots) {
+      const c = spotContest(state, youPlayer, s.vertexId);
+      if (c.oppLen !== null && c.ourLen > 0 && (c.losing || c.tied)) {
+        const gap = c.ourLen - (c.oppLen ?? 0);
+        s.label += c.losing
+          ? ` ⚠ race LOST by ${gap} road${gap === 1 ? "" : "s"} — they get there first`
+          : ` ⚠ tied race (${c.oppLen} roads each) — risky to commit`;
+      }
+    }
+    const c0 = spotContest(state, youPlayer, spots[0].vertexId);
+    if (c0.oppLen !== null) {
+      race = { losing: c0.losing, tied: c0.tied, ourLen: c0.ourLen, oppLen: c0.oppLen };
+      if ((c0.losing || c0.tied) && c0.ourLen > 0) {
+        note = `${note ? note + " " : ""}⚠ Spot ① is contested: opponent needs ${c0.oppLen} road${c0.oppLen === 1 ? "" : "s"} vs our ${c0.ourLen}.`;
+      }
     }
   }
   return {
@@ -323,6 +495,7 @@ export function advisePlacement(
     roadEdges,
     roadPathLength,
     note,
+    race,
   };
 }
 
