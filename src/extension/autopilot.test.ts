@@ -185,8 +185,9 @@ describe("setup placement portfolio", () => {
     expect(Object.values(res).reduce((a, b) => a + b, 0)).toBe(kinds.length);
   });
 
-  it("second-player doubling: plans the pair, weaker payout placed FIRST", async () => {
+  it("second-player doubling: plans the pair, the bigger starting hand placed SECOND", async () => {
     const { advisePlacement, startingResourcesFor, openingValue } = await import("./placement");
+    const { RESOURCES } = await import("../engine/types");
     // opp has placed exactly one settlement, we have none -> we're second and
     // will place twice back-to-back; only our SECOND placement pays out.
     const oppAt = board.vertices.findIndex((v) => v.hexIds.length === 3);
@@ -202,9 +203,45 @@ describe("setup placement portfolio", () => {
     expect(advice.spots.length).toBe(2);
     expect(advice.spots[0].label).toMatch(/place NOW/i);
     expect(advice.spots[1].label).toMatch(/pays the starting hand/i);
-    // invariant of the rule: the paying pick must have the >= opening payout
-    const open = (id: number) => openingValue(startingResourcesFor(state, id));
-    expect(open(advice.spots[0].vertexId)).toBeLessThanOrEqual(open(advice.spots[1].vertexId));
+    // paid by resource COUNT, not by score: the paying (2nd) corner must net at
+    // least as many starting cards as the non-paying (1st) one.
+    const count = (id: number) => {
+      const res = startingResourcesFor(state, id);
+      return RESOURCES.reduce((s, r) => s + res[r], 0);
+    };
+    expect(count(advice.spots[1].vertexId)).toBeGreaterThanOrEqual(count(advice.spots[0].vertexId));
+    // fewer-collecting corner goes first, but within an equal count the higher
+    // weighted opening still pays
+    if (count(advice.spots[0].vertexId) === count(advice.spots[1].vertexId)) {
+      const open = (id: number) => openingValue(startingResourcesFor(state, id));
+      expect(open(advice.spots[0].vertexId)).toBeLessThanOrEqual(open(advice.spots[1].vertexId));
+    }
+  });
+
+  it("second-player doubling: an equal-opening port never steals the paying slot", async () => {
+    const { advisePlacement, startingResourcesFor } = await import("./placement");
+    const { RESOURCES } = await import("../engine/types");
+    const oppAt = board.vertices.findIndex((v) => v.hexIds.length === 3);
+    const state: GameState = {
+      board,
+      buildings: [{ vertexId: oppAt, player: 1, kind: "settlement" }],
+      roads: [],
+    };
+    const advice = advisePlacement(state, 0)!;
+    expect(advice.phase).toBe("setup");
+    const count = (id: number) => {
+      const res = startingResourcesFor(state, id);
+      return RESOURCES.reduce((s, r) => s + res[r], 0);
+    };
+    // a port corner (2 hexes -> <=2 cards) placed SECOND would only collect the
+    // smaller hand; it must be the non-paying (first) pick whenever the other
+    // spot nets more cards.
+    const pay = advice.spots[1];
+    const now = advice.spots[0];
+    const payPort = board.vertices[pay.vertexId].port;
+    if (payPort && count(pay.vertexId) < count(now.vertexId)) {
+      throw new Error("port paid with a smaller hand than the non-paying corner");
+    }
   });
 
   it("second settlement as second player notes that this placement pays", async () => {

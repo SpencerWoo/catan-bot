@@ -839,6 +839,15 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
   function openingValue(res) {
     return RESOURCES.reduce((s, r) => s + res[r] * OPENING_NEED[r], 0);
   }
+  function startingResourceCount(res) {
+    return RESOURCES.reduce((s, r) => s + res[r], 0);
+  }
+  function paysFirstOf(resA, resB) {
+    const nA = startingResourceCount(resA);
+    const nB = startingResourceCount(resB);
+    if (nA !== nB) return nA > nB;
+    return openingValue(resA) >= openingValue(resB);
+  }
   function rankSetupSpots(state, youPlayer, weights, limit = 3) {
     const existing = playerProduction(state, youPlayer);
     const netPipsByToken = /* @__PURE__ */ new Map();
@@ -969,9 +978,9 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
           }
         }
         if (bestPair) {
-          const openFirst = openingValue(startingResourcesFor(state, bestPair.first.vertexId));
-          const openSecond = openingValue(startingResourcesFor(state, bestPair.second.vertexId));
-          const paysFirst = openFirst > openSecond;
+          const resFirst = startingResourcesFor(state, bestPair.first.vertexId);
+          const resSecond = startingResourcesFor(state, bestPair.second.vertexId);
+          const paysFirst = paysFirstOf(resFirst, resSecond);
           const nowSpot = paysFirst ? bestPair.second : bestPair.first;
           const paySpot = paysFirst ? bestPair.first : bestPair.second;
           return {
@@ -990,7 +999,7 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
               }
             ],
             roadEdges: [],
-            note: "Going second, your two placements are back-to-back — nothing can be taken in between. Only the 2nd collects resources, so the weaker-opening corner goes first."
+            note: "Going second, your two placements are back-to-back — nothing can be taken in between. Only the 2nd collects resources, so the corner with the bigger starting hand goes second."
           };
         }
       }
