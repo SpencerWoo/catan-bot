@@ -202,6 +202,25 @@ export function openingValue(res: Record<Resource, number>): number {
   return RESOURCES.reduce((s, r) => s + res[r] * OPENING_NEED[r], 0);
 }
 
+/** Number of starting resources a settlement would collect (one per hex). */
+function startingResourceCount(res: Record<Resource, number>): number {
+  return RESOURCES.reduce((s, r) => s + res[r], 0);
+}
+
+/**
+ * Order two corners by how much they want to be the PAYING opening pick.
+ * When going second only the 2nd settlement collects starting resources, so
+ * the one that nets MORE resources (raw count) should pay; ties break by the
+ * weighted opening value so a tighter (but more useful) hand still wins.
+ * @returns true when `a` should be placed second (collect the resources).
+ */
+function paysFirstOf(resA: Record<Resource, number>, resB: Record<Resource, number>): boolean {
+  const nA = startingResourceCount(resA);
+  const nB = startingResourceCount(resB);
+  if (nA !== nB) return nA > nB; // more raw resources pays
+  return openingValue(resA) >= openingValue(resB);
+}
+
 export function rankSetupSpots(
   state: GameState,
   youPlayer: PlayerId,
@@ -387,9 +406,9 @@ export function advisePlacement(
         }
       }
       if (bestPair) {
-        const openFirst = openingValue(startingResourcesFor(state, bestPair.first.vertexId));
-        const openSecond = openingValue(startingResourcesFor(state, bestPair.second.vertexId));
-        const paysFirst = openFirst > openSecond; // the WEAKER payout goes first
+        const resFirst = startingResourcesFor(state, bestPair.first.vertexId);
+        const resSecond = startingResourcesFor(state, bestPair.second.vertexId);
+        const paysFirst = paysFirstOf(resFirst, resSecond); // the BETTER payout goes second
         const nowSpot = paysFirst ? bestPair.second : bestPair.first;
         const paySpot = paysFirst ? bestPair.first : bestPair.second;
         return {
@@ -408,7 +427,7 @@ export function advisePlacement(
             },
           ],
           roadEdges: [],
-          note: "Going second, your two placements are back-to-back — nothing can be taken in between. Only the 2nd collects resources, so the weaker-opening corner goes first.",
+          note: "Going second, your two placements are back-to-back — nothing can be taken in between. Only the 2nd collects resources, so the corner with the bigger starting hand goes second.",
         };
       }
     }
