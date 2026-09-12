@@ -14,6 +14,12 @@ const dom = new JSDOM(
   { runScripts: "outside-only", pretendToBeVisual: true, url: "https://colonist.io/" },
 );
 const { window } = dom;
+// Simulate a stopped local bridge: rejected fetches must not stop the overlay.
+let bridgeAttempts = 0;
+window.fetch = async () => {
+  bridgeAttempts++;
+  throw new TypeError("Failed to fetch: local bridge is offline");
+};
 
 const bold = (name, color = "#e27174") =>
   `<span style="font-weight:600; color:${color}">${name}</span>`;
@@ -62,6 +68,7 @@ await sleep(700); // debounce is 400ms
 overlay = window.document.getElementById("catan-copilot");
 const text = overlay.textContent;
 const checks = [
+  ["overlay survives rejected bridge requests", bridgeAttempts > 0],
   ["board captured from real protocol", overlay.querySelectorAll("svg polygon").length === 19],
   ["players from roster", text.includes("LadyboyNick") && text.includes("Sera")],
   ["you-detection", text.includes("(you)")],

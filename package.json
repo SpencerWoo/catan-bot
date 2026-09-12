@@ -7,7 +7,10 @@
   "scripts": {
     "build": "vite build && vite build --config vite.inject.config.ts",
     "test": "vitest run",
-    "check": "tsc --noEmit"
+    "check": "tsc --noEmit",
+    "lint:firefox": "npm run build && web-ext lint --source-dir extension --self-hosted",
+    "package:firefox": "node scripts/firefox-release.mjs package",
+    "sign:firefox": "node scripts/firefox-release.mjs sign"
   },
   "devDependencies": {
     "@msgpack/msgpack": "^3.1.3",
@@ -15,6 +18,7 @@
     "playwright": "^1.62.1",
     "typescript": "^5.6.3",
     "vite": "^5.4.11",
-    "vitest": "^2.1.8"
+    "vitest": "^2.1.8",
+    "web-ext": "^10.6.0"
   }
 }

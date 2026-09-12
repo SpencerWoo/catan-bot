@@ -23,20 +23,70 @@ you play and keeps up-to-date:
 - **Trade tips** — what you're one trade away from building, what to offer, and
   your best observed bank/port ratios.
 
-It is **advice-only**: the content script never clicks, sends, or automates
-anything. Check colonist.io's terms and your table's house rules before using
-assistance tools in competitive games.
+Advice is available by default. **Experimental autopilot is optional and off
+at the start of each session**; when enabled, it can perform gameplay actions.
 
-## Install (Firefox 128+)
+## Install permanently (Firefox 140+)
 
-1. `npm install && npm run build` (regenerates `extension/content.js` and
-   `extension/inject.js`)
-2. Open `about:debugging#/runtime/this-firefox`
-3. Click **Load Temporary Add-on…** and pick `extension/manifest.json`
-4. Open (or refresh) colonist.io **before joining a game** — the WebSocket tap
-   must be in place when the game connects. The panel appears at the top right
-   (drag to move, `–` to collapse). Temporary add-ons unload when Firefox
-   quits; just load it again.
+Install the **Mozilla-signed `.xpi`** once:
+
+1. Open `about:addons` in Firefox.
+2. Open the gear menu → **Install Add-on From File…** and select the signed XPI.
+3. Accept the installation and data permissions, then open or refresh
+   colonist.io **before joining a game**.
+
+The extension stays installed when Firefox quits. It is privately distributed,
+with no public Firefox Add-ons listing. To update, install a newer signed XPI
+using the same menu; no reload is needed after ordinary browser restarts.
+
+### Build and sign your own copy
+
+Requires Node.js 22+, npm, and `zip` (included on macOS).
+
+```sh
+npm ci
+npm run package:firefox
+```
+
+This creates `dist/firefox/catan-copilot-<version>-unsigned.zip` and
+`dist/firefox/catan-copilot-<version>-source.zip`. **The unsigned ZIP cannot be
+installed permanently in normal Firefox.**
+
+For one-time signing setup, sign in to the
+[Mozilla Developer Hub](https://addons.mozilla.org/developers/) and obtain
+[API credentials](https://addons.mozilla.org/developers/addon/api/key/).
+Set `WEB_EXT_API_KEY` and `WEB_EXT_API_SECRET` in your local shell environment
+using a secure prompt or password manager; do not commit them or paste them
+into chat. Then run:
+
+```sh
+npm run sign:firefox
+```
+
+This rebuilds and lints the add-on, uploads the review sources, and requests
+**unlisted** signing. Install the signed `.xpi` downloaded into `dist/firefox/`.
+Signing may await Mozilla review; check the Developer Hub if it times out.
+For updates, bump the manifest version, keep the extension ID, and sign again.
+See [BUILDING.md](BUILDING.md) for reproducible builds and reviewer notes.
+
+### Data permissions
+
+The optional local coaching server receives player usernames, game state,
+move history, and game results via `127.0.0.1:8137`. The extension attempts
+these local requests automatically; it continues working when no server is
+running. Firefox's installation prompt declares usernames, website content,
+and website activity. Local game records and learned actions also persist
+in colonist.io localStorage. Firefox 140+ provides the built-in consent prompt.
+
+### Development: temporary loading
+
+1. Run `npm ci && npm run build`.
+2. Open `about:debugging#/runtime/this-firefox`.
+3. Click **Load Temporary Add-on…** and pick `extension/manifest.json`.
+4. Open or refresh colonist.io before joining a game.
+
+Temporary add-ons unload when Firefox quits. Use the signed XPI above for
+normal use. `npm run lint:firefox` rebuilds and validates the extension.
 
 The manifest is MV3 and registers `inject.js` as a MAIN-world content script
 at `document_start`, so the WebSocket wrap is synchronous — no injection race
@@ -69,7 +119,7 @@ is missing, and all log-based features keep working without it.
 ## Layout
 
 ```
-extension/            manifest (MV2) + built content.js and inject.js bundles
+extension/            manifest (MV3) + built content.js and inject.js bundles
 src/extension/
   content.ts          bootstrap: find log, sweep history, observe new rows,
                       receive board events from the page tap, run autopilot
