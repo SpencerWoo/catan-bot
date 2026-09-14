@@ -2104,6 +2104,25 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
     }
     return actions;
   }
+  function sevenExposure(tracker2, rolls) {
+    const deck = deckStatus(tracker2);
+    let left = deck.totalRemaining, sevens = deck.remaining.get(7) ?? 6;
+    let survival = 1;
+    for (let i = 0; i < Math.ceil(rolls) && survival > 0; i++) {
+      if (left <= 5) {
+        left = 36;
+        sevens = 6;
+      }
+      survival *= Math.max(0, (left - sevens) / left);
+      left--;
+    }
+    return 1 - survival;
+  }
+  function expectedDiscardLoss(tracker2, hand, limit, rolls = Math.max(2, tracker2.players.size)) {
+    const total2 = RESOURCES.reduce((n, r) => n + hand[r], 0);
+    if (total2 <= limit) return 0;
+    return sevenExposure(tracker2, rolls) * Math.floor(total2 / 2);
+  }
   function bonusTiming(players, plans, target, kind, playKnight = false) {
     var _a;
     const me = players.find((p) => p.isYou);
@@ -2333,18 +2352,15 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
       options.push({ kind: "dev", cost: BUILD.dev, vp: 5 / 25 + armyValue, production: unblocking });
     }
     const builds = evaluateBuilds(options, you.hand, production, you.bankRatio, remaining, gap, horizon);
-    const total2 = RESOURCES.reduce((n, r) => n + you.hand[r], 0);
-    if (total2 > tracker2.discardLimit) {
-      const seven = deckStatus(tracker2).prob.get(7) ?? 1 / 6;
-      for (const build of builds) if (build.wait > 0) {
-        const discard = planDiscard(you.hand, Math.floor(total2 / 2), null, build.cost);
-        const retained = Object.fromEntries(RESOURCES.map((r) => [r, you.hand[r] - (discard[r] ?? 0)]));
-        const after = evaluateBuilds([build], retained, production, you.bankRatio, remaining, gap, horizon)[0];
-        const exposure = 1 - Math.pow(1 - seven, rolls * Math.max(1, build.wait));
-        build.score = (1 - exposure) * build.score + exposure * Math.min(build.score, after.score);
-      }
-      builds.sort((a, b) => b.score - a.score || a.wait - b.wait);
+    for (const build of builds) if (build.wait > 0) {
+      build.score -= expectedDiscardLoss(
+        tracker2,
+        you.hand,
+        tracker2.discardLimit,
+        rolls * Math.max(1, Math.min(build.wait, horizon.turns))
+      ) / 4;
     }
+    builds.sort((a, b) => b.score - a.score || a.wait - b.wait);
     const reserve = ((_b = builds[0]) == null ? void 0 : _b.cost) ?? remaining;
     const weights = Object.fromEntries(RESOURCES.map((r) => [
       r,
@@ -3038,7 +3054,7 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
     return best;
   }
   function decideNext(opts) {
-    var _a, _b, _c, _d, _e;
+    var _a, _b, _c, _d, _e, _f, _g, _h, _i;
     const { tracker: tracker2, youName, fit, gs, advice, rolledThisTurn, robberPending, robberHex, discardPending } = opts;
     const you = tracker2.players.get(youName);
     if (!you) return null;
@@ -3144,8 +3160,9 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
     const canBuild = (item) => item === "dev" ? devAvailable : hasPiece(item) && allowed(item === "city" ? "build-city" : item === "road" ? "build-road" : "build-settlement");
     const afford = (item) => RESOURCES.every((r) => you.hand[r] >= (COSTS[item][r] ?? 0));
     const choices = planning.builds.filter((b) => canBuild(b.kind));
-    const funded = opts.funding ? choices.find((b) => b.kind === opts.funding.kind && b.vertexId === opts.funding.vertexId && affordableWithTrades(you.hand, you.bankRatio, b.cost)) : void 0;
-    const top = funded ?? choices[0];
+    const funded = opts.funding ? choices.find((b) => b.kind === opts.funding.kind && b.vertexId === opts.funding.vertexId && (opts.funding.partial || affordableWithTrades(you.hand, you.bankRatio, b.cost))) : void 0;
+    let top = funded ?? choices[0];
+    let deliberateHold = "";
     const evaluation = {
       horizon: planning.horizon.turns,
       gap: planning.gap,
@@ -3250,10 +3267,93 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
         return finish({ kind: "play-road-building", describe: `free roads accelerate the planned ${free.kind}` });
       }
     }
-    if (top) {
+    if (top && handSize > limit && (!funded || ((_e = opts.funding) == null ? void 0 : _e.partial))) {
+      const raw = evaluateBuilds(
+        ((_f = opts.funding) == null ? void 0 : _f.partial) && funded ? [funded] : choices,
+        you.hand,
+        planning.production,
+        you.bankRatio,
+        planning.remaining,
+        planning.gap,
+        planning.horizon
+      );
+      const save = raw[0];
+      const loss = (hand) => expectedDiscardLoss(tracker2, hand, limit);
+      const savingRolls = Math.max(2, tracker2.players.size);
+      let bestValue = save.score - expectedDiscardLoss(tracker2, you.hand, limit, savingRolls) / 4;
+      let bestAction = null;
+      for (const choice of raw) {
+        if (choice.wait >= planning.horizon.turns) continue;
+        let action = build(choice);
+        const hand = { ...you.hand };
+        let conversion = 0;
+        let partial = false;
+        if (!action && ((_g = choice.roadEdges) == null ? void 0 : _g.length) && afford("road") && allowed("build-road") && hasPiece("road") && gs && board) {
+          const edge = board.edges[choice.roadEdges[0]];
+          const coord = pixelsToColonistEdge(board.vertices[edge.a], board.vertices[edge.b]);
+          if (coord) action = {
+            kind: "build-road",
+            coord,
+            describe: `road toward planned ${choice.kind}, completable within the remaining game`
+          };
+        }
+        if (action) {
+          if ((_h = choice.roadEdges) == null ? void 0 : _h.length) {
+            if (action.trade) {
+              hand[action.trade.give] -= action.trade.giveCount;
+              hand[action.trade.get]++;
+              conversion = action.trade.giveCount - 1;
+            } else {
+              hand.wood--;
+              hand.brick--;
+            }
+          } else {
+            let trade = tradeTowardCost(hand, you.bankRatio, choice.cost, planning.weights);
+            while (trade) {
+              hand[trade.give] -= trade.giveCount;
+              hand[trade.get]++;
+              conversion += trade.giveCount - 1;
+              trade = tradeTowardCost(hand, you.bankRatio, choice.cost, planning.weights);
+            }
+            for (const r of RESOURCES) hand[r] -= choice.cost[r] ?? 0;
+          }
+        } else if (allowed("bank-trade")) {
+          const trade = tradeTowardCost(hand, you.bankRatio, choice.cost, planning.weights);
+          if (!trade) continue;
+          hand[trade.give] -= trade.giveCount;
+          hand[trade.get]++;
+          conversion = trade.giveCount - 1;
+          partial = true;
+          action = {
+            kind: "bank-trade",
+            trade,
+            funding: { kind: choice.kind, vertexId: choice.vertexId, partial: true },
+            describe: `bank-trade ${trade.giveCount} ${trade.give} for ${trade.get} toward ${choice.kind}`
+          };
+        }
+        if (!action) continue;
+        const competing = partial ? save : raw.find((b) => b !== choice);
+        const afterWait = competing ? turnsToAfford(competing.cost, hand, planning.production, you.bankRatio) : 0;
+        const delay = !competing ? 0 : Number.isFinite(afterWait) && Number.isFinite(competing.wait) ? Math.max(0, afterWait - competing.wait) / (1 + planning.horizon.turns) : 1;
+        const value = (partial ? save.score : choice.score) - loss(hand) / 4 - conversion / 4 - delay;
+        if (value > bestValue + 1e-9) {
+          bestValue = value;
+          bestAction = action;
+        }
+      }
+      if (bestAction) return finish({
+        ...bestAction,
+        describe: `${bestAction.describe} — reduce discard exposure (${Math.round(sevenExposure(tracker2, Math.max(2, tracker2.players.size)) * 100)}% estimated seven risk before spending again)`
+      });
+      if (save.wait > 0) {
+        top = save;
+        deliberateHold = ` — reward outweighs spending now; accepting ${Math.round(sevenExposure(tracker2, savingRolls) * 100)}% estimated seven risk before spending again`;
+      }
+    }
+    if (top && !deliberateHold) {
       const action = build(top);
       if (action) return finish(action);
-      if (((_e = top.roadEdges) == null ? void 0 : _e.length) && top.wait < planning.horizon.turns && afford("road") && allowed("build-road") && hasPiece("road") && gs && board) {
+      if (((_i = top.roadEdges) == null ? void 0 : _i.length) && top.wait < planning.horizon.turns && afford("road") && allowed("build-road") && hasPiece("road") && gs && board) {
         const edge = board.edges[top.roadEdges[0]];
         const coord = pixelsToColonistEdge(board.vertices[edge.a], board.vertices[edge.b]);
         if (coord) return finish({
@@ -3267,7 +3367,7 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
       const offer = proposeTrade(you.hand, [top.cost], planning.weights, { alreadyAsked: opts.askedThisTurn, handLimit: limit });
       if (offer) return finish({ kind: "propose-trade", offer, describe: "offer a trade toward the planned build" });
     }
-    return allowed("end-turn") ? finish({ kind: "end-turn", describe: top ? `save for ${top.kind} (~${top.wait.toFixed(1)} turns)` : "end turn — no verified build target" }) : null;
+    return allowed("end-turn") ? finish({ kind: "end-turn", describe: top ? `save for ${top.kind} (~${top.wait.toFixed(1)} turns)${deliberateHold}` : "end turn — no verified build target" }) : null;
   }
   class Autopilot {
     constructor(learner2, dispatch = () => false, domAct = (kind, exclude) => tryDomAction(kind, document, exclude), domDiscard = tryDomDiscard) {
@@ -3598,7 +3698,7 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
       byPlayers
     };
   }
-  const VERSION = "v1.21 bonus-timing";
+  const VERSION = "v1.22 risk-aware-spending";
   const CSS = `
 #catan-copilot {
   --surface: #fcfcfb; --ink: #0b0b0b; --ink-2: #52514e; --ink-3: #898781;

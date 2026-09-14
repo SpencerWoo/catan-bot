@@ -3,8 +3,9 @@ import { isVertexBuildable, playerProduction } from "../engine/analysis";
 import { analyzeVictory, BUILD, Cost, Hand, PlayerVictoryInput, VictoryPlan } from "../engine/winnability";
 import { BuildEvaluation, BuildOption, evaluateBuilds, gameHorizon, Horizon } from "../engine/horizon";
 import { roadPathTo, PlacementAdvice, describeVertex } from "./placement";
-import { expectedProduction, deckStatus, planDiscard } from "./copilot";
+import { expectedProduction } from "./copilot";
 import { TrackerState, visibleVp } from "./tracker";
+import { expectedDiscardLoss } from "./discardRisk";
 import { bonusTiming } from "../engine/bonusTiming";
 
 export interface PlanningContext {
@@ -206,22 +207,14 @@ export function planPosition(tracker: TrackerState, youName: string,
     options.push({ kind: "dev", cost: BUILD.dev, vp: 5 / 25 + armyValue, production: unblocking });
   }
   const builds = evaluateBuilds(options, you.hand, production, you.bankRatio, remaining, gap, horizon);
-  // Saving exposes an over-limit reserve to intervening sevens. Compare the
-  // retained investment after a useful discard with the no-discard case;
-  // affordable actions have no waiting exposure. This is an expected-value
-  // approximation, not a command to spend cards on arbitrary roads/trades.
-  const total = RESOURCES.reduce((n, r) => n + you.hand[r], 0);
-  if (total > tracker.discardLimit) {
-    const seven = deckStatus(tracker).prob.get(7) ?? 1 / 6;
-    for (const build of builds) if (build.wait > 0) {
-      const discard = planDiscard(you.hand, Math.floor(total / 2), null, build.cost);
-      const retained = Object.fromEntries(RESOURCES.map(r => [r, you.hand[r] - (discard[r] ?? 0)])) as Hand;
-      const after = evaluateBuilds([build], retained, production, you.bankRatio, remaining, gap, horizon)[0];
-      const exposure = 1 - Math.pow(1 - seven, rolls * Math.max(1, build.wait));
-      build.score = (1 - exposure) * build.score + exposure * Math.min(build.score, after.score);
-    }
-    builds.sort((a, b) => b.score - a.score || a.wait - b.wait);
+  // Charge the whole exposed hand, not only the delay to this build.
+  // Immediate purchases are compared using their actual remaining hand by
+  // the pilot, which also knows the allowed actions and trade sequence.
+  for (const build of builds) if (build.wait > 0) {
+    build.score -= expectedDiscardLoss(tracker, you.hand, tracker.discardLimit,
+      rolls * Math.max(1, Math.min(build.wait, horizon.turns))) / 4;
   }
+  builds.sort((a, b) => b.score - a.score || a.wait - b.wait);
   const reserve = builds[0]?.cost ?? remaining;
   const weights = Object.fromEntries(RESOURCES.map((r) => [r,
     1 + Math.max(0, (reserve[r] ?? 0) - you.hand[r]) / (1 + production[r] * horizon.turns)])) as Hand;

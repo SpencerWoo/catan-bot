@@ -1093,18 +1093,16 @@ describe("autopilot decisions", () => {
     expect(board.vertices[M].hexIds.some((id) => board.hexes[id].kind === "wheat")).toBe(true);
   });
 
-  it("funds an affordable dev with 4:1 trades rather than hoard for an unfunded city", () => {
-    // 11 cards of wood/sheep, one settlement to upgrade, a city 5 cards away:
-    // not completable with trades this turn, but sitting on it just feeds 7s.
+  it("accepts holding risk when a dev purchase would burn six cards in conversions", () => {
+    // Buying a dev via two 4:1 trades loses six cards to conversion alone.
+    // At ordinary deck exposure, that certainty costs more than holding.
     const t = trackerWith({ wood: 6, sheep: 5 }, false);
     const fits = rankLiveStrategies(t, "Nick");
     const d = decideNext({
       tracker: t, youName: "Nick", fit: fits[0], gs: gsWithSettlement(), advice: null, rolledThisTurn: true,
     });
-    expect(d?.kind).toBe("bank-trade");
-    expect(d?.trade?.giveCount).toBe(4);
-    expect(d?.funding?.kind).toBe("dev");
-
+    expect(d?.kind).toBe("end-turn");
+    expect(d?.describe).toContain("reward outweighs spending now");
   });
 
   it("endgame steering: builds the win-model's step first", () => {

@@ -3,6 +3,7 @@ import { vertexPips } from "../engine/board";
 import { evaluateBuilds, turnsToAfford, BuildEvaluation } from "../engine/horizon";
 import { PlanningContext, planPosition } from "./planning";
 import { bonusTiming } from "../engine/bonusTiming";
+import { expectedDiscardLoss, sevenExposure } from "./discardRisk";
 import { confirmedMonopolyHaul } from "./handLedger";
 import { distanceFromPlayer, isVertexBuildable, playerProduction } from "../engine/analysis";
 import { pixelToColonistCorner, pixelsToColonistEdge } from "./coords";
@@ -33,8 +34,8 @@ export interface AutopilotDecision {
   cards?: Partial<Record<Resource, number>>;
   /** for "bank-trade": give `giveCount` of `give` to get one `get` */
   trade?: { give: Resource; get: Resource; giveCount: number };
-  /** Keep a sequence of bank trades committed to the build it can fund now. */
-  funding?: { kind: BuildEvaluation["kind"]; vertexId?: number };
+  /** Keep trades on one target until purchase or turn end, avoiding reversals. */
+  funding?: { kind: BuildEvaluation["kind"]; vertexId?: number; partial?: boolean };
   /** for "play-monopoly": the resource to steal from everyone */
   resource?: Resource;
   /** for "play-year-of-plenty": the two resources to take from the bank */
@@ -746,8 +747,9 @@ export function decideNext(opts: {
 
   const choices = planning.builds.filter((b) => canBuild(b.kind));
   const funded = opts.funding ? choices.find((b) => b.kind === opts.funding!.kind && b.vertexId === opts.funding!.vertexId &&
-    affordableWithTrades(you.hand, you.bankRatio, b.cost)) : undefined;
-  const top = funded ?? choices[0];
+    (opts.funding!.partial || affordableWithTrades(you.hand, you.bankRatio, b.cost))) : undefined;
+  let top = funded ?? choices[0];
+  let deliberateHold = "";
   const evaluation = { horizon: planning.horizon.turns, gap: planning.gap,
     alternatives: choices.slice(0, 8).map((b) => ({ kind: b.kind, score: b.score, wait: b.wait, vertexId: b.vertexId })) };
   const finish = (decision: AutopilotDecision): AutopilotDecision => ({ ...decision, evaluation });
@@ -844,7 +846,81 @@ export function decideNext(opts: {
       return finish({ kind: "play-road-building", describe: `free roads accelerate the planned ${free.kind}` });
     }
   }
-  if (top) {
+  // Compare spending against saving in the same score/card units. Re-run
+  // after every confirmed action; a purchase need not get below the limit.
+  if (top && handSize > limit && (!funded || opts.funding?.partial)) {
+    const raw = evaluateBuilds(opts.funding?.partial && funded ? [funded] : choices, you.hand, planning.production, you.bankRatio,
+      planning.remaining, planning.gap, planning.horizon);
+    const save = raw[0];
+    const loss = (hand: Record<Resource, number>) => expectedDiscardLoss(tracker, hand, limit);
+    const savingRolls = Math.max(2, tracker.players.size);
+    let bestValue = save.score - expectedDiscardLoss(tracker, you.hand, limit, savingRolls) / 4;
+    let bestAction: AutopilotDecision | null = null;
+    for (const choice of raw) {
+      if (choice.wait >= planning.horizon.turns) continue;
+      let action = build(choice);
+      const hand = { ...you.hand };
+      let conversion = 0;
+      let partial = false;
+      if (!action && choice.roadEdges?.length && afford("road") &&
+          allowed("build-road") && hasPiece("road") && gs && board) {
+        const edge = board.edges[choice.roadEdges[0]];
+        const coord = pixelsToColonistEdge(board.vertices[edge.a], board.vertices[edge.b]);
+        if (coord) action = { kind: "build-road", coord,
+          describe: `road toward planned ${choice.kind}, completable within the remaining game` };
+      }
+      if (action) {
+        // Evaluate the completed funded purchase, including every conversion.
+        // Roads are executed one stage at a time, so retain the rest of the budget.
+        if (choice.roadEdges?.length) {
+          if (action.trade) {
+            hand[action.trade.give] -= action.trade.giveCount;
+            hand[action.trade.get]++;
+            conversion = action.trade.giveCount - 1;
+          } else {
+            hand.wood--; hand.brick--;
+          }
+        } else {
+          let trade = tradeTowardCost(hand, you.bankRatio, choice.cost, planning.weights);
+          while (trade) {
+            hand[trade.give] -= trade.giveCount; hand[trade.get]++;
+            conversion += trade.giveCount - 1;
+            trade = tradeTowardCost(hand, you.bankRatio, choice.cost, planning.weights);
+          }
+          for (const r of RESOURCES) hand[r] -= choice.cost[r] ?? 0;
+        }
+      } else if (allowed("bank-trade")) {
+        const trade = tradeTowardCost(hand, you.bankRatio, choice.cost, planning.weights);
+        if (!trade) continue;
+        hand[trade.give] -= trade.giveCount; hand[trade.get]++;
+        conversion = trade.giveCount - 1;
+        partial = true;
+        action = { kind: "bank-trade", trade,
+          funding: { kind: choice.kind, vertexId: choice.vertexId, partial: true },
+          describe: `bank-trade ${trade.giveCount} ${trade.give} for ${trade.get} toward ${choice.kind}` };
+      }
+      if (!action) continue;
+      const competing = partial ? save : raw.find(b => b !== choice);
+      const afterWait = competing ? turnsToAfford(competing.cost, hand, planning.production, you.bankRatio) : 0;
+      const delay = !competing ? 0 : Number.isFinite(afterWait) && Number.isFinite(competing.wait)
+        ? Math.max(0, afterWait - competing.wait) / (1 + planning.horizon.turns) : 1;
+      // An incomplete trade creates no points yet. It must pay for its certain
+      // conversion loss through reduced risk; delay also protects better builds.
+      const value = (partial ? save.score : choice.score) - loss(hand) / 4
+        - conversion / 4 - delay;
+      if (value > bestValue + 1e-9) { bestValue = value; bestAction = action; }
+    }
+    if (bestAction) return finish({ ...bestAction,
+      describe: `${bestAction.describe} — reduce discard exposure (${Math.round(sevenExposure(tracker, Math.max(2, tracker.players.size)) * 100)}% estimated seven risk before spending again)` });
+    if (save.wait > 0) {
+      // Saving won the reward-minus-risk comparison. Do not then fall back
+      // to a cheaper purchase from the separately ranked planning list.
+      top = save;
+      deliberateHold = ` — reward outweighs spending now; accepting ${Math.round(sevenExposure(tracker, savingRolls) * 100)}% estimated seven risk before spending again`;
+    }
+  }
+
+  if (top && !deliberateHold) {
     const action = build(top);
     if (action) return finish(action);
     // Commit affordable road stages only when the complete investment fits
@@ -857,16 +933,14 @@ export function decideNext(opts: {
       if (coord) return finish({ kind: "build-road", coord,
         describe: `road toward planned ${top.kind}, completable within the remaining game` });
     }
-    // Keep cards until the chosen investment is fundable. Trading surplus
-    // early cannot beat the option to make that same trade later, and a
-    // possible discard is not a reason to guarantee conversion losses.
+    // Risk-driven partial trades were compared above; otherwise retain cards.
 
   }
   if (opts.canProposeTrade && top && allowed("propose-trade")) {
     const offer = proposeTrade(you.hand, [top.cost], planning.weights, { alreadyAsked: opts.askedThisTurn, handLimit: limit });
     if (offer) return finish({ kind: "propose-trade", offer, describe: "offer a trade toward the planned build" });
   }
-  return allowed("end-turn") ? finish({ kind: "end-turn", describe: top ? `save for ${top.kind} (~${top.wait.toFixed(1)} turns)` : "end turn — no verified build target" }) : null;
+  return allowed("end-turn") ? finish({ kind: "end-turn", describe: top ? `save for ${top.kind} (~${top.wait.toFixed(1)} turns)${deliberateHold}` : "end turn — no verified build target" }) : null;
 }
 
 export interface AutopilotView {
