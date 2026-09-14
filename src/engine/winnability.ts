@@ -231,7 +231,7 @@ function cheapestPlan(buys: Buy[], gap: number, player: PlayerVictoryInput): Buy
 
 /** Finance successive builds, adding their production as soon as built.
  * This avoids projecting an entire game's costs at the opening economy. */
-function sequenceTime(steps: VictoryStep[], p: PlayerVictoryInput): number {
+export function sequenceTime(steps: VictoryStep[], p: PlayerVictoryInput): number {
   const hand = { ...p.hand };
   const rolls = p.rollsPerTurn ?? 2;
   const rate = Object.fromEntries(RESOURCES.map((r) => [r, p.production[r] * rolls])) as Hand;
