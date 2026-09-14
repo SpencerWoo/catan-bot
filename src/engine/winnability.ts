@@ -276,7 +276,7 @@ function summarise(p: PlayerVictoryInput, plan: VictoryStep[], eliminated: boole
   const parts: string[] = [];
   for (const [kind, n] of counts) parts.push(`${n} ${n > 1 ? label[kind][1] : label[kind][0]}`);
   let s = parts.join(" + ");
-  if ((p.hiddenVp ?? 0) > 0) s = `(+${p.isYou ? "" : "~"}${Number(p.hiddenVp.toFixed(1))} hidden) ` + s;
+  if ((p.hiddenVp ?? 0) > 0) s = `(+${p.isYou ? "" : "~"}${Number((p.hiddenVp ?? 0).toFixed(1))} hidden) ` + s;
   // Call out a blocked natural path so the "why" is explicit.
   if ((p.citiesLeft ?? 1) === 0 && p.settlementsOnBoard > 0) s += " (no cities left)";
   if (!laReach && !lrReach && (p.roadsLeft ?? 1) === 0) s += "; roads spent";

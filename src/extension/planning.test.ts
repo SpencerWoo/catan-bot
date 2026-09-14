@@ -88,3 +88,42 @@ describe("bank trade commitment", () => {
     expect(actions).toEqual(["bank-trade", "bank-trade", "buy-dev"]);
   });
 });
+
+it("discounts exposed saving while retaining the value of immediate builds", () => {
+  const t = players();
+  t.players.get('Us')!.hand = { ...zeroHand(), wood: 6, sheep: 5 };
+  const board = generateBoard(42);
+  const gs = { state: { board, buildings: [{ player: 0 as const, vertexId: 0, kind: 'settlement' as const }], roads: [] }, youPlayer: 0 as const };
+  t.discardLimit = 99;
+  const safe = planPosition(t, 'Us', gs);
+  t.discardLimit = 7;
+  const exposed = planPosition(t, 'Us', gs);
+  const city = (p: typeof safe) => p.builds.find(b => b.kind === 'city')!;
+  expect(city(exposed).score).toBeLessThan(city(safe).score);
+  expect(exposed.builds.find(b => b.kind === 'dev')!.score).toBe(safe.builds.find(b => b.kind === 'dev')!.score);
+});
+
+it("takes only the necessary connected roads and respects the finite supply", async () => {
+  const { roadBonusPath, longestRoad } = await import('./planning');
+  const board = generateBoard(42);
+  const state: GameState = { board, roads: [], buildings: [] };
+  let vertex = 0;
+  const visited = new Set([vertex]);
+  for (let i = 0; i < 4; i++) {
+    const edge = board.edges.find(e => (e.a === vertex && !visited.has(e.b)) || (e.b === vertex && !visited.has(e.a)))!;
+    state.roads.push({ edgeId: edge.id, player: 0 });
+    vertex = edge.a === vertex ? edge.b : edge.a;
+    visited.add(vertex);
+  }
+  expect(longestRoad(state, 0)).toBe(4);
+  const path = roadBonusPath(state, 0, 5, 1)!;
+  expect(path).toHaveLength(1);
+  expect(longestRoad({ ...state, roads: [...state.roads, { edgeId: path[0], player: 0 }] }, 0)).toBe(5);
+  expect(roadBonusPath(state, 0, 7, 1)).toBeNull();
+  expect(roadBonusPath(state, 0, 4, 15)).toEqual([]);
+  const t = players();
+  const gs = { state, youPlayer: 0 as const };
+  const inputs = planPosition(t, 'Us', gs).inputs;
+  inputs.find(p => p.isYou)!.holdsLongestRoad = true;
+  expect(planPosition(t, 'Us', gs, { inputs }).builds.some(b => b.kind === 'road')).toBe(false);
+});

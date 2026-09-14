@@ -49,3 +49,52 @@ The panel has been visually reordered: play checkbox, board and plan, player han
 - Both built-bundle smoke checks passed: overlay/control order and exact-hand recovery across steals, reversed delivery, duplicates and reconnect.
 - Firefox lint: zero errors/notices; four dynamic-innerHTML warnings remain.
 - On the validation machine (Node 25), tests used `NODE_OPTIONS=--no-experimental-webstorage` to prevent Node's experimental global storage from shadowing jsdom storage.
+
+## v1.20: September 14 follow-up
+
+The next export retained the UziYamal win (18:31 UTC) and simpy007 loss
+(19:09 UTC). Both are marked incomplete: missing log history prevents an exact
+opponent-hand replay. The committed decision fixtures preserve this health;
+tests reproduce observed inputs without declaring the histories exact.
+
+Two concrete bugs explain the reported behavior:
+
+- `turnsToAfford` combined fractional bank credits from unrelated resource
+  piles immediately after time zero. A ten-card hand with no sheep and no
+  four-card surplus therefore forecast a settlement in 0.000000004 turns.
+  The executor correctly refused the illegal conversion, but the imaginary
+  investment outranked executable cities. Forecasts and successive-build
+  financing now require whole conversions per resource.
+- The wire VP-source enum was wrong: source 2 is held VP cards, source 4 is
+  Longest Road. The private capture ties source 4 directly to
+  `hasLongestRoad: true`. The simpy game's actual public scores were 7–13,
+  while the old interpretation reported 9–11. In the Uzi win the bot's road
+  was length 12 versus 7, yet its ownership flag was false. It could reward
+  further roads with a bonus it already owned. Live planning now reads the
+  authoritative road mechanic, with the corrected VP-source fallback.
+
+| Captured decision | Old action | Revised action with recorded inputs |
+| --- | --- | --- |
+| Uzi win, 32: ten cards including 3 ore and 4 wheat | End turn | Build city |
+| simpy loss, 75: 12 wood and 7 wheat | End turn | 4:1 trade funding city at vertex 3 |
+| simpy loss, 77: same 19-card hand | End turn | 4:1 trade funding that city |
+| simpy loss, 79: 12 wood, 7 wheat, 2 ore | End turn | 4:1 trade funding that city |
+
+Saving an over-limit hand now includes an approximate expected discard cost,
+using the counted seven probability and the reserve retained after discarding.
+This decreases the value of waiting without forcing wasteful purchases. Existing
+regressions still preserve a near-ready productive city reserve and reject
+unfunded conversion loops. The risk approximation does not simulate every future
+roll, hand, or discard.
+
+Longest Road search still has a three-addition bound. Within that bound it
+prefers the fewest pieces, breaks equal-length ties by productive settlement
+access within the remaining supply, and does not offer an already-held bonus.
+No verified route means search uncertainty, not elimination.
+
+The old softmax value was a relative ranking, not a calibrated win probability.
+The panel now displays expected turns to finish instead of percentages such as
+98%. Corrected scores and financing improve the underlying forecast, but dice,
+hidden cards, opponent decisions and incomplete capture still limit its accuracy.
+These replay checks establish corrected decisions, not hypothetical wins or a
+measured win-rate improvement.

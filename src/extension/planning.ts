@@ -90,7 +90,7 @@ export function roadBonusPath(state: GameState, player: PlayerId, target: number
         const access = settlementRoutes(trial, player)
           .filter(r => r.edges.length <= supply - path.length)
           .reduce((best, r) => Math.max(best,
-            Object.values(r.production).reduce((n, x) => n + x, 0) / (1 + r.edges.length)), 0);
+            Object.values(r.production ?? {}).reduce((n, x) => n + x, 0) / (1 + r.edges.length)), 0);
         winners.push({ path, access });
         continue;
       }

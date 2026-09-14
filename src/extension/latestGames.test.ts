@@ -20,7 +20,7 @@ for (const [log, indices] of [[uzi, [32]], [simpy, [75, 77, 79]]] as const) {
     for (const p of inputs) {
       applyEvent(tracker, { type: 'place', player: p.name, color: p.name, what: 'settlement' });
       const held = d.hands.find(h => h.name === p.name)!;
-      Object.assign(tracker.players.get(p.name)!, { hand: held.hand, serverCards: held.total,
+      Object.assign(tracker.players.get(p.name)!, { hand: { ...held.hand }, serverCards: held.total,
         serverVp: held.publicVp, trackingHealth: held.health, bankRatio: p.bankRatios });
       p.settlementRoutes = settlementRoutes(state, p.playerId as PlayerId);
       p.cityProduction = state.buildings.filter(b => b.player === p.playerId && b.kind === 'settlement')
@@ -41,3 +41,25 @@ for (const [log, indices] of [[uzi, [32]], [simpy, [75, 77, 79]]] as const) {
     }
   });
 }
+
+it('does not chase a phantom Longest Road award in the retained win', () => {
+  const d = uzi.decisions.find(d => d.sourceDecision === 90)!;
+  const me = d.planningInputs.find(p => p.isYou)!;
+  // At 12 versus 7, the unique leader already owns the award. The old wire
+  // mapping instead treated the absence of a held VP card as "no Longest Road".
+  expect(me.longestRoadLen).toBe(12);
+  expect(me.holdsLongestRoad).toBe(false);
+  const tracker = createTracker(uzi.you);
+  for (const p of d.planningInputs) {
+    applyEvent(tracker, { type: 'place', player: p.name, color: p.name, what: 'settlement' });
+    Object.assign(tracker.players.get(p.name)!, { hand: { ...p.hand }, bankRatio: p.bankRatios });
+  }
+  const state = { board: uzi.boardGeometry, ...d.position } as GameState;
+  const inputs = structuredClone(d.planningInputs) as PlayerVictoryInput[];
+  inputs.find(p => p.isYou)!.holdsLongestRoad = true;
+  for (const p of inputs) p.settlementRoutes = settlementRoutes(state, p.playerId as PlayerId);
+  const planning = planPosition(tracker, uzi.you, { state, youPlayer: me.playerId as PlayerId },
+    { inputs, target: uzi.settings.victoryPointsToWin, devDeckLeft: d.bankDevCards });
+  expect(planning.builds.some(b => b.kind === 'road')).toBe(false);
+  expect(planning.builds.filter(b => b.kind === 'settlement').every(b => (b.roadEdges?.length ?? 0) <= me.roadsLeft)).toBe(true);
+});

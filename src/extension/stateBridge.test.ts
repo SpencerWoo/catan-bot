@@ -139,3 +139,21 @@ describe("StateBridge (real capture)", () => {
     expect(gs.youPlayer).not.toBeNull();
   });
 });
+
+it("separates a held VP card from the authoritative Longest Road owner", () => {
+  const b = new StateBridge();
+  // Minimal fields from the simpy protocol capture, not inferred from the UI.
+  b.apply(91, { diff: { playerStates: {
+    '5': { victoryPointsState: { '0': 1, '1': 3, '2': 1 } },
+    '2': { victoryPointsState: { '0': 3, '1': 3, '3': 1, '4': 1 } },
+  }, mechanicLongestRoadState: {
+    '5': { longestRoad: 2, hasLongestRoad: false },
+    '2': { longestRoad: 5, hasLongestRoad: true },
+  } } });
+  expect(b.publicVp(5)).toBe(7);
+  expect(b.publicVp(2)).toBe(13);
+  expect(b.holdsLongestRoad(5)).toBe(false);
+  expect(b.holdsLongestRoad(2)).toBe(true);
+  b.apply(91, { diff: { mechanicLongestRoadState: { '2': { hasLongestRoad: false } } } });
+  expect(b.holdsLongestRoad(2)).toBe(false);
+});
