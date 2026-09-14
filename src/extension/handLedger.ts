@@ -24,28 +24,33 @@ const total = (h: ResourceDelta): number => RESOURCES.reduce((s, r) => s + (h[r]
  */
 export class HandLedger {
   readonly events = new Map<number, GameEvent>();
+  private anchor: { id: number; snapshot: HandSnapshot } | null = null;
+  get lastSnapshot(): HandSnapshot | null { return this.anchor ? structuredClone(this.anchor.snapshot) : null; }
   constructor(readonly you: string, readonly opponent: string, public complete = false) {}
 
   record(id: number, event: GameEvent): void {
+    if (this.anchor && id <= this.anchor.id && JSON.stringify(this.events.get(id)) !== JSON.stringify(event)) this.anchor = null;
     this.events.set(id, event);
   }
 
   project(snapshot: HandSnapshot): LedgerProjection {
     if (!this.complete) return { health: "incomplete", reason: "Opening resource history missing", opponent: null };
     const pool = empty();
-    const own = empty();
-    let ownTotal = 0;
+    const own = this.anchor ? { ...this.anchor.snapshot.mine } : empty();
+    let ownTotal = total(own);
     let ownIdentityKnown = true;
+    let afterAnchor = !this.anchor;
     let invalid = false;
     const change = (player: string, delta: ResourceDelta, factor = 1): void => {
       if (player !== this.you && player !== this.opponent) { invalid = true; return; }
       for (const r of RESOURCES) {
         pool[r] += factor * (delta[r] ?? 0);
-        if (player === this.you) own[r] += factor * (delta[r] ?? 0);
+        if (afterAnchor && player === this.you) own[r] += factor * (delta[r] ?? 0);
       }
-      if (player === this.you) ownTotal += factor * total(delta);
+      if (afterAnchor && player === this.you) ownTotal += factor * total(delta);
     };
-    for (const [, ev] of [...this.events].sort(([a], [b]) => a - b)) {
+    for (const [id, ev] of [...this.events].sort(([a], [b]) => a - b)) {
+      afterAnchor = !this.anchor || id > this.anchor.id;
       switch (ev.type) {
         case "got": case "starting-resources": case "take-from-bank": change(ev.player, ev.resources); break;
         case "discard": change(ev.player, ev.resources, -1); break;
@@ -65,6 +70,7 @@ export class HandLedger {
           if (new Set([thief, victim, this.you, this.opponent]).size !== 2 || thief === victim) {
             invalid = true; break;
           }
+          if (!afterAnchor) break;
           const sign = thief === this.you ? 1 : -1;
           ownTotal += sign;
           if (ev.type === "steal-known") own[ev.resource] += sign;
@@ -72,6 +78,7 @@ export class HandLedger {
           break;
         }
         case "monopoly-steal": {
+          if (!afterAnchor) break;
           const sign = ev.player === this.you ? 1 : -1;
           ownTotal += sign * ev.count;
           own[ev.resource] += sign * ev.count;
@@ -85,6 +92,7 @@ export class HandLedger {
       total(opponent) === snapshot.opponentTotal &&
       RESOURCES.every((r) => Number.isInteger(opponent[r]) && opponent[r] >= 0 &&
         (!ownIdentityKnown || own[r] === snapshot.mine[r]));
+    if (consistent) this.anchor = { id: Math.max(-1, ...this.events.keys()), snapshot: structuredClone(snapshot) };
     return consistent
       ? { health: "exact", reason: "1v1 ledger agrees with private hand and both server totals", opponent }
       : { health: "repairing", reason: "Waiting for resource events and server hands to agree", opponent: null };

@@ -3,207 +3,433 @@ var __defNormalProp = (obj, key, value) => key in obj ? __defProp(obj, key, { en
 var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "symbol" ? key + "" : key, value);
 (function() {
   "use strict";
-  const ALT_TO_RESOURCE = {
-    grain: "wheat",
-    wool: "sheep",
-    lumber: "wood",
-    brick: "brick",
-    ore: "ore"
-  };
-  const RESOURCE_IMG_SELECTOR = Object.keys(ALT_TO_RESOURCE).flatMap((a) => [`img[alt="${a}"]`, `img[alt="${cap$1(a)}"]`]).join(", ");
-  function cap$1(s) {
-    return s.charAt(0).toUpperCase() + s.slice(1);
-  }
-  function resourceFromAlt(alt) {
-    if (!alt) return null;
-    return ALT_TO_RESOURCE[alt.toLowerCase()] ?? null;
-  }
-  function getPlayerName(el) {
-    var _a;
-    const span = el.querySelector(
-      'span[style*="font-weight:600"], span[style*="font-weight: 600"]'
-    );
-    return ((_a = span == null ? void 0 : span.textContent) == null ? void 0 : _a.trim()) || null;
-  }
-  function getPlayerColor(el) {
-    const span = el.querySelector(
-      'span[style*="font-weight:600"], span[style*="font-weight: 600"]'
-    );
-    return (span == null ? void 0 : span.style.color) || "#888";
-  }
-  function getSecondPlayerName(el) {
-    var _a;
-    const spans = el.querySelectorAll(
-      'span[style*="font-weight:600"], span[style*="font-weight: 600"]'
-    );
-    return spans.length > 1 ? ((_a = spans[1].textContent) == null ? void 0 : _a.trim()) || null : null;
-  }
-  function countResources(root) {
-    const out = {};
-    root.querySelectorAll(RESOURCE_IMG_SELECTOR).forEach((img) => {
-      const res = resourceFromAlt(img.getAttribute("alt"));
-      if (res) out[res] = (out[res] ?? 0) + 1;
-    });
-    return out;
-  }
-  function countAroundMarker(el, marker) {
-    const html = el.innerHTML;
-    const idx = html.indexOf(marker);
-    if (idx === -1) return null;
-    const mk = (fragment) => {
-      const div = el.ownerDocument.createElement("div");
-      div.innerHTML = fragment;
-      return countResources(div);
-    };
-    return { before: mk(html.slice(0, idx)), after: mk(html.slice(idx + marker.length)) };
-  }
-  function sum(d) {
-    return Object.values(d).reduce((s, n) => s + (n ?? 0), 0);
-  }
-  function negate(d) {
-    const out = {};
-    for (const [k, v] of Object.entries(d)) out[k] = -(v ?? 0);
-    return out;
-  }
-  function merge(a, b) {
-    const out = { ...a };
-    for (const [k, v] of Object.entries(b)) {
-      out[k] = (out[k] ?? 0) + (v ?? 0);
-    }
-    return out;
-  }
-  function hasImg(el, names) {
-    return names.some(
-      (n) => el.querySelector(`img[alt="${n}"], img[alt="${cap$1(n)}"]`)
-    );
-  }
-  function parseLogRow(el) {
-    var _a;
-    const text = ((_a = el.textContent) == null ? void 0 : _a.replace(/\s+/g, " ").trim()) || "";
-    const player = getPlayerName(el);
-    if (!text || text.includes("has disconnected") || text.includes("has reconnected") || text.includes("will take over") || text.includes("left the game") || text.includes("Learn how to play") || el.querySelector("hr")) {
-      return { type: "ignored" };
-    }
-    if (text.includes("won the game")) {
-      return { type: "game-over", winner: player };
-    }
-    if (text.includes("rolled")) {
-      const dice = el.querySelectorAll('img[alt^="dice_"]');
-      if (dice.length === 2 && player) {
-        const total = parseInt(dice[0].getAttribute("alt").replace("dice_", ""), 10) + parseInt(dice[1].getAttribute("alt").replace("dice_", ""), 10);
-        return { type: "roll", player, total };
-      }
-      return { type: "ignored" };
-    }
-    if (text.includes("blocked by the Robber")) {
-      const probImg = el.querySelector('img[alt^="prob_"]');
-      const tileImg = el.querySelector('img[alt$=" tile"]');
-      const total = probImg ? parseInt(probImg.getAttribute("alt").replace("prob_", ""), 10) : NaN;
-      const res = tileImg ? resourceFromAlt(tileImg.getAttribute("alt").replace(" tile", "")) : null;
-      if (!Number.isNaN(total) && res) return { type: "blocked-roll", total, resource: res };
-      return { type: "ignored" };
-    }
-    if (text.includes("received starting resources") && player) {
-      return { type: "starting-resources", player, resources: countResources(el) };
-    }
-    if (text.includes("placed a") && player) {
-      if (hasImg(el, ["settlement"])) {
-        return { type: "place", player, color: getPlayerColor(el), what: "settlement" };
-      }
-      if (hasImg(el, ["road"])) {
-        return { type: "place", player, color: getPlayerColor(el), what: "road" };
-      }
-      if (hasImg(el, ["city"])) {
-        return { type: "place", player, color: getPlayerColor(el), what: "city" };
-      }
-    }
-    if (text.includes("built a") && player) {
-      if (hasImg(el, ["settlement"])) return { type: "build", player, what: "settlement" };
-      if (hasImg(el, ["city"])) return { type: "build", player, what: "city" };
-      if (hasImg(el, ["road"])) return { type: "build", player, what: "road" };
-    }
-    if (text.includes("bought") && el.querySelector(
-      'img[alt="development card"], img[alt="Development card"], img[alt="Development Card"]'
-    ) && player) {
-      return { type: "buy-dev", player };
-    }
-    if (text.includes("gave bank") && text.includes("took") && player) {
-      const parts = countAroundMarker(el, " and took ");
-      if (parts) {
-        return {
-          type: "bank-trade",
-          player,
-          delta: merge(negate(parts.before), parts.after),
-          gave: sum(parts.before),
-          took: sum(parts.after)
-        };
-      }
-    }
-    if (text.includes("gave") && text.includes("got") && text.includes("from")) {
-      const html = el.innerHTML;
-      const gotIdx = html.indexOf(" and got ");
-      const fromIdx = html.lastIndexOf(" from ");
-      if (gotIdx !== -1 && fromIdx > gotIdx && player) {
-        const mk = (fragment) => {
-          const div = el.ownerDocument.createElement("div");
-          div.innerHTML = fragment;
-          return countResources(div);
-        };
-        const gave = mk(html.slice(0, gotIdx));
-        const got = mk(html.slice(gotIdx + " and got ".length, fromIdx));
-        return {
-          type: "player-trade",
-          player,
-          partner: getSecondPlayerName(el),
-          delta: merge(negate(gave), got)
-        };
-      }
-    }
-    if (/stole \d+/.test(text) && player) {
-      const res = countResources(el);
-      const kind = Object.keys(res)[0];
-      const m = text.match(/stole (\d+)/);
-      if (kind && m) {
-        return { type: "monopoly-steal", player, resource: kind, count: parseInt(m[1], 10) };
-      }
-    }
-    if (text.includes("stole") && text.includes("from")) {
-      const res = countResources(el);
-      const kind = Object.keys(res)[0] ?? null;
-      const isYouThief = /^You stole/i.test(text);
-      const isYouVictim = / from you/i.test(text);
-      const first = player;
-      const second = getSecondPlayerName(el);
-      const thief = isYouThief ? null : first;
-      const victim = isYouVictim ? null : isYouThief ? first : second;
-      if (kind) return { type: "steal-known", thief, victim, resource: kind };
-      return { type: "steal-unknown", thief, victim };
-    }
-    if (text.includes("took from bank") && player) {
-      return { type: "take-from-bank", player, resources: countResources(el) };
-    }
-    if (text.includes("discarded") && player) {
-      return { type: "discard", player, resources: countResources(el) };
-    }
-    if (text.includes("used") && player) {
-      if (text.includes("Knight")) return { type: "use-knight", player };
-      if (text.includes("Year of Plenty")) return { type: "use-dev", player, card: "year-of-plenty" };
-      if (text.includes("Road Building")) return { type: "use-dev", player, card: "road-building" };
-      if (text.includes("Monopoly")) return { type: "use-dev", player, card: "monopoly" };
-    }
-    if (text.includes("moved Robber") && player) {
-      return { type: "move-robber", player };
-    }
-    if (text.includes("got") && player) {
-      const resources = countResources(el);
-      if (sum(resources) > 0) return { type: "got", player, resources };
-    }
-    return { type: "ignored" };
-  }
   const RESOURCES = ["wood", "brick", "sheep", "wheat", "ore"];
   function pips(token) {
     if (token === null) return 0;
     return 6 - Math.abs(7 - token);
+  }
+  function turnsToAfford(cost, hand, production, ratios = {}) {
+    const covered = (turns) => {
+      let shortage = 0, exchange = 0;
+      for (const r of RESOURCES) {
+        const spare = hand[r] + production[r] * turns - (cost[r] ?? 0);
+        if (spare < 0) shortage -= spare;
+        else exchange += turns === 0 ? Math.floor(spare / (ratios[r] ?? 4)) : spare / (ratios[r] ?? 4);
+      }
+      return exchange + 1e-9 >= shortage;
+    };
+    if (covered(0)) return 0;
+    if (RESOURCES.every((r) => production[r] <= 0)) return Infinity;
+    let hi = 1;
+    while (hi < 4096 && !covered(hi)) hi *= 2;
+    if (!covered(hi)) return Infinity;
+    let lo = 0;
+    for (let i = 0; i < 28; i++) {
+      const mid = (lo + hi) / 2;
+      if (covered(mid)) hi = mid;
+      else lo = mid;
+    }
+    return hi;
+  }
+  function gameHorizon(finishTimes) {
+    const finite = finishTimes.filter((n) => Number.isFinite(n) && n >= 0);
+    const turns = finite.length ? Math.min(...finite) : 24;
+    return { turns, urgency: 1 / (1 + turns) };
+  }
+  function evaluateBuilds(options, hand, production, ratios, remaining, gap, horizon) {
+    const resourceValue = (r) => {
+      const short = Math.max(0, (remaining[r] ?? 0) - hand[r]);
+      const supplied = production[r] * horizon.turns;
+      const usefulShare = short / Math.max(1, short + supplied);
+      return usefulShare + (1 - usefulShare) / (ratios[r] ?? 4);
+    };
+    return options.map((option) => {
+      const wait = turnsToAfford(option.cost, hand, production, ratios) + (option.delay ?? 0);
+      const lifetime = Math.max(0, horizon.turns - wait);
+      let productionValue = RESOURCES.reduce((s, r) => s + option.production[r] * lifetime * resourceValue(r), 0);
+      if (option.ratios) for (const r of RESOURCES) {
+        const surplus = Math.max(0, hand[r] + production[r] * lifetime - (remaining[r] ?? 0) - (option.cost[r] ?? 0));
+        productionValue += surplus * Math.max(0, 1 / (option.ratios[r] ?? 4) - 1 / (ratios[r] ?? 4));
+      }
+      const points = Math.min(Math.max(0, gap), option.vp);
+      const wins = option.kind !== "dev" && points >= gap && gap > 0;
+      const discount = Number.isFinite(wait) ? Math.exp(-wait / (1 + horizon.turns)) / (1 + wait) : 0;
+      const score = (points + productionValue / 4) * discount + (wins && wait === 0 ? 100 : 0);
+      return { ...option, wait, score, productionValue };
+    }).sort((a, b) => b.score - a.score || a.wait - b.wait || a.kind.localeCompare(b.kind));
+  }
+  const BUILD = {
+    city: { ore: 3, wheat: 2 },
+    settlement: { wood: 1, brick: 1, sheep: 1, wheat: 1 },
+    road: { wood: 1, brick: 1 },
+    dev: { ore: 1, sheep: 1, wheat: 1 }
+  };
+  const VP_CARD_RATE = 5 / 25;
+  const BONUS_VP = 2;
+  const TAU = 2;
+  function costCards(c) {
+    return RESOURCES.reduce((s, r) => s + (c[r] ?? 0), 0);
+  }
+  function addCost(a, b) {
+    const out = { ...a };
+    for (const r of RESOURCES) if (b[r]) out[r] = (out[r] ?? 0) + (b[r] ?? 0);
+    return out;
+  }
+  function scaleCost(c, k) {
+    const out = {};
+    for (const r of RESOURCES) if (c[r]) out[r] = (c[r] ?? 0) * k;
+    return out;
+  }
+  function buysFor(p, ctx, holdsLA, holdsLR, laReach, lrReach, knightsToLA, roadsToLR) {
+    var _a, _b;
+    const buys = [];
+    const cityN = Math.min(p.citiesLeft ?? Infinity, p.settlementsOnBoard);
+    for (let i = 0; i < cityN; i++) {
+      buys.push({
+        kind: "city",
+        vp: 1,
+        cost: BUILD.city,
+        note: "upgrade a settlement to a city",
+        production: ((_a = p.cityProduction) == null ? void 0 : _a[i]) ?? Object.fromEntries(RESOURCES.map((r) => [
+          r,
+          p.production[r] / Math.max(1, p.settlementsOnBoard + 2 * (4 - (p.citiesLeft ?? 4)))
+        ]))
+      });
+    }
+    const settN = p.settlementsLeft ?? 0;
+    const freeSpots = p.settlementSpotOpen ? 1 : 0;
+    const routes = (_b = p.settlementRoutes) == null ? void 0 : _b.slice().sort((a, b) => a.edges.length - b.edges.length);
+    for (let i = 0; i < ((routes == null ? void 0 : routes.length) ?? settN); i++) {
+      const route = routes == null ? void 0 : routes[i];
+      const roads = route ? route.edges.length : i >= freeSpots ? 1 : 0;
+      if (roads > (p.roadsLeft ?? 0)) continue;
+      buys.push({
+        kind: "settlement",
+        vp: 1,
+        cost: addCost(BUILD.settlement, scaleCost(BUILD.road, roads)),
+        note: roads ? `${roads} road${roads === 1 ? "" : "s"} + settlement` : "settlement on an open spot",
+        production: route == null ? void 0 : route.production,
+        vertexId: route == null ? void 0 : route.vertexId,
+        roadEdges: route == null ? void 0 : route.edges,
+        conflicts: route == null ? void 0 : route.conflicts
+      });
+      if (route && (p.citiesLeft ?? 0) > 0) buys.push({
+        kind: "city",
+        vp: 1,
+        cost: BUILD.city,
+        note: "upgrade the planned settlement to a city",
+        production: route.production,
+        vertexId: route.vertexId,
+        requiresSettlement: route.vertexId
+      });
+    }
+    if (!holdsLA && laReach) {
+      buys.push({
+        kind: "largest-army",
+        vp: BONUS_VP,
+        cost: scaleCost(BUILD.dev, Math.max(0, knightsToLA - (p.knightsInHand ?? 0)) / (14 / 25)),
+        delay: Math.max(0, knightsToLA - ((p.playableKnights ?? 0) > 0 ? 1 : 0)),
+        note: `${knightsToLA} more knight${knightsToLA > 1 ? "s" : ""} for Largest Army`
+      });
+    }
+    if (!holdsLR && lrReach) {
+      buys.push({
+        kind: "longest-road",
+        vp: BONUS_VP,
+        cost: scaleCost(BUILD.road, roadsToLR),
+        roadEdges: p.longestRoadPath ?? void 0,
+        note: `${roadsToLR} more road${roadsToLR > 1 ? "s" : ""} for Longest Road`
+      });
+    }
+    const perVp = Math.round(1 / VP_CARD_RATE);
+    const vpDevCap = ctx.devDeckLeft === null ? 6 : Math.floor(ctx.devDeckLeft * VP_CARD_RATE + 1e-3);
+    for (let i = 0; i < vpDevCap; i++) {
+      buys.push({ kind: "vp-dev", vp: 1, cost: scaleCost(BUILD.dev, perVp), note: "victory-point dev card (expected)" });
+    }
+    return buys;
+  }
+  function cheapestPlan(buys, gap, player) {
+    var _a, _b;
+    if (gap <= 0) return [];
+    const rate = Object.fromEntries(RESOURCES.map((r) => [r, player.production[r] * (player.rollsPerTurn ?? 2)]));
+    const dp = Array.from({ length: Math.ceil(gap) + 1 }, () => []);
+    dp[0] = [{ items: [], cost: {}, time: 0, roads: 0, settlements: 0, cities: 0 }];
+    for (const b of buys) {
+      for (let v = dp.length - 2; v >= 0; v--) {
+        for (const c of [...dp[v]]) {
+          if (b.requiresSettlement !== void 0 && !c.items.some((x) => x.kind === "settlement" && x.vertexId === b.requiresSettlement)) continue;
+          if (b.kind === "settlement" && b.vertexId !== void 0 && c.items.some((x) => {
+            var _a2;
+            return x.vertexId === b.vertexId || ((_a2 = x.conflicts) == null ? void 0 : _a2.includes(b.vertexId));
+          })) continue;
+          const cities = c.cities + (b.kind === "city" ? 1 : 0);
+          if (cities > (player.citiesLeft ?? 0)) continue;
+          const settlements = c.settlements + (b.kind === "settlement" ? 1 : 0);
+          if (settlements - c.cities > (player.settlementsLeft ?? 0)) continue;
+          const edges = new Set(c.items.flatMap((x) => x.roadEdges ?? []));
+          const extraRoads = b.roadEdges ? b.roadEdges.filter((id) => !edges.has(id)).length : b.kind === "longest-road" ? b.cost.wood ?? 0 : b.kind === "settlement" ? (b.cost.wood ?? 1) - 1 : 0;
+          const roads = c.roads + extraRoads;
+          if (roads > (player.roadsLeft ?? 0)) continue;
+          const cost = addCost(c.cost, b.cost);
+          const shared = (((_a = b.roadEdges) == null ? void 0 : _a.length) ?? extraRoads) - extraRoads;
+          if (shared > 0) {
+            cost.wood = (cost.wood ?? 0) - shared;
+            cost.brick = (cost.brick ?? 0) - shared;
+          }
+          const delay = Math.max(b.delay ?? 0, ...c.items.map((x) => x.delay ?? 0));
+          const time = turnsToAfford(cost, player.hand, rate, player.bankRatios) + delay;
+          const nv = Math.min(dp.length - 1, v + b.vp);
+          dp[nv].push({ items: [...c.items, b], cost, time, roads, settlements, cities });
+        }
+        for (let n = v + 1; n < dp.length; n++) {
+          dp[n].sort((a, b2) => a.time - b2.time || costCards(a.cost) - costCards(b2.cost));
+          dp[n] = dp[n].slice(0, 24);
+        }
+      }
+    }
+    return ((_b = dp[dp.length - 1].sort((a, b) => sequenceTime(a.items, player) - sequenceTime(b.items, player))[0]) == null ? void 0 : _b.items) ?? [];
+  }
+  function sequenceTime(steps, p) {
+    var _a, _b, _c;
+    const hand = { ...p.hand };
+    const rolls = p.rollsPerTurn ?? 2;
+    const rate = Object.fromEntries(RESOURCES.map((r) => [r, p.production[r] * rolls]));
+    const usedRoads = /* @__PURE__ */ new Set();
+    let elapsed = 0;
+    for (const step of steps) {
+      const cost = { ...step.cost };
+      for (const id of step.roadEdges ?? []) {
+        if (usedRoads.has(id)) {
+          cost.wood = (cost.wood ?? 0) - 1;
+          cost.brick = (cost.brick ?? 0) - 1;
+        }
+        usedRoads.add(id);
+      }
+      const wait = turnsToAfford(cost, hand, rate, p.bankRatios);
+      if (!Number.isFinite(wait)) return Infinity;
+      elapsed += wait;
+      let missing = 0;
+      for (const r of RESOURCES) {
+        hand[r] += rate[r] * wait - (cost[r] ?? 0);
+        if (hand[r] < 0) {
+          missing -= hand[r];
+          hand[r] = 0;
+        }
+      }
+      for (const r of [...RESOURCES].sort((a, b) => {
+        var _a2, _b2;
+        return (((_a2 = p.bankRatios) == null ? void 0 : _a2[a]) ?? 4) - (((_b2 = p.bankRatios) == null ? void 0 : _b2[b]) ?? 4);
+      })) {
+        const take = Math.min(missing, hand[r] / (((_a = p.bankRatios) == null ? void 0 : _a[r]) ?? 4));
+        hand[r] -= take * (((_b = p.bankRatios) == null ? void 0 : _b[r]) ?? 4);
+        missing -= take;
+      }
+      for (const r of RESOURCES) rate[r] += (((_c = step.production) == null ? void 0 : _c[r]) ?? 0) * rolls;
+    }
+    return elapsed + Math.max(0, ...steps.map((s) => s.delay ?? 0));
+  }
+  function summarise(p, plan, eliminated, laReach, lrReach) {
+    if (p.publicVp <= 0 && plan.length === 0 && eliminated) return "not in the game yet";
+    if (eliminated) return "no verified path to the target with the available pieces and routes";
+    if (plan.length === 0) return "already at the target";
+    const counts = /* @__PURE__ */ new Map();
+    for (const s2 of plan) counts.set(s2.kind, (counts.get(s2.kind) ?? 0) + 1);
+    const label = {
+      city: ["city", "cities"],
+      settlement: ["settlement", "settlements"],
+      "largest-army": ["Largest Army", "Largest Army"],
+      "longest-road": ["Longest Road", "Longest Road"],
+      "vp-dev": ["VP dev card", "VP dev cards"]
+    };
+    const parts = [];
+    for (const [kind, n] of counts) parts.push(`${n} ${n > 1 ? label[kind][1] : label[kind][0]}`);
+    let s = parts.join(" + ");
+    if ((p.hiddenVp ?? 0) > 0) s = `(+${p.isYou ? "" : "~"}${p.hiddenVp} hidden) ` + s;
+    if ((p.citiesLeft ?? 1) === 0 && p.settlementsOnBoard > 0) s += " (no cities left)";
+    if (!laReach && !lrReach && (p.roadsLeft ?? 1) === 0) s += "; roads spent";
+    return s;
+  }
+  function analyzeVictory(players, ctx) {
+    const maxKnights = Math.max(0, ...players.map((p) => p.knightsPlayed));
+    const knightLeaders = players.filter((p) => p.knightsPlayed === maxKnights && maxKnights >= 3);
+    const maxRoad = Math.max(0, ...players.map((p) => p.longestRoadLen));
+    const roadLeaders = players.filter((p) => p.longestRoadLen === maxRoad && maxRoad >= 5);
+    const plans = players.map((p) => {
+      var _a;
+      const holdsLA = p.holdsLargestArmy ?? (knightLeaders.length === 1 && knightLeaders[0].name === p.name);
+      const holdsLR = p.holdsLongestRoad ?? (roadLeaders.length === 1 && roadLeaders[0].name === p.name);
+      const knightsToLA = holdsLA ? 0 : Math.max(3, maxKnights + 1) - p.knightsPlayed;
+      const laReach = !holdsLA && knightsToLA >= 1 && (ctx.devDeckLeft === null || ctx.devDeckLeft + (p.knightsInHand ?? 0) >= knightsToLA);
+      const roadsToLR = holdsLR ? 0 : p.longestRoadPath === null ? Infinity : ((_a = p.longestRoadPath) == null ? void 0 : _a.length) ?? Math.max(5, maxRoad + 1) - p.longestRoadLen;
+      const lrReach = !holdsLR && roadsToLR >= 1 && (p.roadsLeft ?? 0) >= roadsToLR;
+      const gap = Math.ceil(ctx.target - p.publicVp - (p.hiddenVp ?? 0));
+      const buys = buysFor(p, ctx, holdsLA, holdsLR, laReach, lrReach, knightsToLA, roadsToLR);
+      const maxAttainable = buys.reduce((s, b) => s + b.vp, 0);
+      let eliminated = gap > 0 && maxAttainable < gap;
+      const won = gap <= 0;
+      const chosen = won ? [] : cheapestPlan(buys, gap, p);
+      if (!won && chosen.length === 0) eliminated = true;
+      const steps = chosen.map((b) => ({ kind: b.kind, vp: b.vp, cost: b.cost, note: b.note, delay: b.delay, production: b.production, vertexId: b.vertexId, roadEdges: b.roadEdges }));
+      const planVp = steps.reduce((s, b) => s + b.vp, 0);
+      const fundedRoads = /* @__PURE__ */ new Set();
+      const totalCost = steps.reduce((acc, s) => {
+        const next = addCost(acc, s.cost);
+        for (const id of s.roadEdges ?? []) {
+          if (fundedRoads.has(id)) {
+            next.wood = (next.wood ?? 0) - 1;
+            next.brick = (next.brick ?? 0) - 1;
+          }
+          fundedRoads.add(id);
+        }
+        return next;
+      }, {});
+      const need = {};
+      for (const r of RESOURCES) {
+        const n = (totalCost[r] ?? 0) - p.hand[r];
+        if (n > 0) need[r] = n;
+      }
+      const turnsToWin = won ? 0 : eliminated ? Infinity : sequenceTime(steps, p);
+      return {
+        name: p.name,
+        isYou: p.isYou,
+        publicVp: p.publicVp,
+        target: ctx.target,
+        eliminated,
+        steps,
+        planVp,
+        need,
+        turnsToWin,
+        winProb: 0,
+        largestArmyReachable: laReach,
+        longestRoadReachable: lrReach,
+        summary: summarise(p, steps, eliminated, laReach, lrReach)
+      };
+    });
+    const live = plans.filter((p) => !p.eliminated && Number.isFinite(p.turnsToWin));
+    const tmin = Math.min(...live.map((p) => p.turnsToWin), Infinity);
+    let wsum = 0;
+    const weights = plans.map((p) => {
+      if (p.eliminated || !Number.isFinite(p.turnsToWin)) return 0;
+      const w = Math.exp(-(p.turnsToWin - tmin) / TAU);
+      wsum += w;
+      return w;
+    });
+    plans.forEach((p, i) => {
+      p.winProb = wsum > 0 ? weights[i] / wsum : 0;
+    });
+    return plans.sort((a, b) => b.winProb - a.winProb);
+  }
+  const empty = () => ({ wood: 0, brick: 0, sheep: 0, wheat: 0, ore: 0 });
+  const total = (h) => RESOURCES.reduce((s, r) => s + (h[r] ?? 0), 0);
+  class HandLedger {
+    constructor(you, opponent, complete = false) {
+      __publicField(this, "events", /* @__PURE__ */ new Map());
+      __publicField(this, "anchor", null);
+      this.you = you;
+      this.opponent = opponent;
+      this.complete = complete;
+    }
+    get lastSnapshot() {
+      return this.anchor ? structuredClone(this.anchor.snapshot) : null;
+    }
+    record(id, event) {
+      if (this.anchor && id <= this.anchor.id && JSON.stringify(this.events.get(id)) !== JSON.stringify(event)) this.anchor = null;
+      this.events.set(id, event);
+    }
+    project(snapshot) {
+      if (!this.complete) return { health: "incomplete", reason: "Opening resource history missing", opponent: null };
+      const pool = empty();
+      const own = this.anchor ? { ...this.anchor.snapshot.mine } : empty();
+      let ownTotal = total(own);
+      let ownIdentityKnown = true;
+      let afterAnchor = !this.anchor;
+      let invalid = false;
+      const change = (player, delta, factor = 1) => {
+        if (player !== this.you && player !== this.opponent) {
+          invalid = true;
+          return;
+        }
+        for (const r of RESOURCES) {
+          pool[r] += factor * (delta[r] ?? 0);
+          if (afterAnchor && player === this.you) own[r] += factor * (delta[r] ?? 0);
+        }
+        if (afterAnchor && player === this.you) ownTotal += factor * total(delta);
+      };
+      for (const [id, ev] of [...this.events].sort(([a], [b]) => a - b)) {
+        afterAnchor = !this.anchor || id > this.anchor.id;
+        switch (ev.type) {
+          case "got":
+          case "starting-resources":
+          case "take-from-bank":
+            change(ev.player, ev.resources);
+            break;
+          case "discard":
+            change(ev.player, ev.resources, -1);
+            break;
+          case "build":
+            change(ev.player, BUILD[ev.what], -1);
+            break;
+          case "buy-dev":
+            change(ev.player, BUILD.dev, -1);
+            break;
+          case "bank-trade":
+            change(ev.player, ev.delta);
+            break;
+          case "player-trade": {
+            const partner = ev.partner ?? (ev.player === this.you ? this.opponent : this.you);
+            if (ev.player === partner) {
+              invalid = true;
+              break;
+            }
+            change(ev.player, ev.delta);
+            change(partner, ev.delta, -1);
+            break;
+          }
+          case "steal-known":
+          case "steal-unknown": {
+            const thief = ev.thief ?? this.you;
+            const victim = ev.victim ?? this.you;
+            if ((/* @__PURE__ */ new Set([thief, victim, this.you, this.opponent])).size !== 2 || thief === victim) {
+              invalid = true;
+              break;
+            }
+            if (!afterAnchor) break;
+            const sign = thief === this.you ? 1 : -1;
+            ownTotal += sign;
+            if (ev.type === "steal-known") own[ev.resource] += sign;
+            else ownIdentityKnown = false;
+            break;
+          }
+          case "monopoly-steal": {
+            if (!afterAnchor) break;
+            const sign = ev.player === this.you ? 1 : -1;
+            ownTotal += sign * ev.count;
+            own[ev.resource] += sign * ev.count;
+            break;
+          }
+        }
+      }
+      const opponent = empty();
+      for (const r of RESOURCES) opponent[r] = pool[r] - snapshot.mine[r];
+      const consistent = !invalid && ownTotal === total(snapshot.mine) && total(opponent) === snapshot.opponentTotal && RESOURCES.every((r) => Number.isInteger(opponent[r]) && opponent[r] >= 0 && (!ownIdentityKnown || own[r] === snapshot.mine[r]));
+      if (consistent) this.anchor = { id: Math.max(-1, ...this.events.keys()), snapshot: structuredClone(snapshot) };
+      return consistent ? { health: "exact", reason: "1v1 ledger agrees with private hand and both server totals", opponent } : { health: "repairing", reason: "Waiting for resource events and server hands to agree", opponent: null };
+    }
+    /** Serializable history, also used by replay tests and game exports. */
+    export() {
+      return [...this.events].sort(([a], [b]) => a - b).map(([id, event]) => ({ id, event }));
+    }
+  }
+  function confirmedMonopolyHaul(players, you, resource) {
+    let haul = 0;
+    let opponents = 0;
+    for (const p of players) {
+      if (p.name === you) continue;
+      opponents++;
+      if (p.trackingHealth !== "exact" || p.serverCards !== total(p.hand)) return 0;
+      haul += p.hand[resource];
+    }
+    return opponents > 0 ? haul : 0;
   }
   function mulberry32(seed) {
     let a = seed >>> 0;
@@ -373,8 +599,6 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
     }
     if (v.port) {
       const feed = v.port.ratio === 2 ? pipsByKind[v.port.kind] ?? 0 : 0;
-      const bonus = v.port.ratio === 2 ? 2.5 + feed * 0.4 : 1.5;
-      score += bonus;
       notes.push(
         v.port.ratio === 2 ? `2:1 ${v.port.kind} port${feed > 0 ? ` fed by ${feed} pips here` : ""}` : "3:1 port"
       );
@@ -653,10 +877,10 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
     const richest = sorted[sorted.length - 1];
     const notes = [];
     notes.push(
-      `${cap(richest)} is plentiful (${abundance[richest]} pips) — it will trade poorly, don't over-invest.`
+      `${cap$1(richest)} is plentiful (${abundance[richest]} pips) — it will trade poorly, don't over-invest.`
     );
     notes.push(
-      `${cap(scarcest)} is scarce (${abundance[scarcest]} pips) — corner it and everyone trades with you.`
+      `${cap$1(scarcest)} is scarce (${abundance[scarcest]} pips) — corner it and everyone trades with you.`
     );
     const roadRes = abundance.wood + abundance.brick;
     const cityRes = abundance.ore + abundance.wheat;
@@ -716,7 +940,7 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
       tips.push({
         give: surplus,
         get: needed,
-        reason: `${cap(surplus)} is your most expendable income; ${cap(needed)} is the bottleneck for ${fit.strategy.name}.`
+        reason: `${cap$1(surplus)} is your most expendable income; ${cap$1(needed)} is the bottleneck for ${fit.strategy.name}.`
       });
     }
     const scarcest = analyzeBoard(state).scarcest;
@@ -729,7 +953,7 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
     }
     return tips;
   }
-  function cap(s) {
+  function cap$1(s) {
     return s.charAt(0).toUpperCase() + s.slice(1);
   }
   const COLONIST_COLORS = {
@@ -769,9 +993,9 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
   function describeVertex(state, vertexId) {
     const v = state.board.vertices[vertexId];
     const parts = v.hexIds.map((hid) => state.board.hexes[hid]).filter((h) => h.kind !== "desert" && h.token !== null).sort((a, b) => pips(b.token) - pips(a.token)).map((h) => `${h.token}-${h.kind}`);
-    const total = vertexPips(state.board, vertexId);
+    const total2 = vertexPips(state.board, vertexId);
     const port = v.port ? v.port.ratio === 2 ? `, 2:1 ${v.port.kind} port` : ", 3:1 port" : "";
-    return `${parts.join(" + ") || "coastal"} (${total} pips${port})`;
+    return `${parts.join(" + ") || "coastal"} (${total2} pips${port})`;
   }
   function roadPathTo(state, player, target, fromVertices) {
     const sources = /* @__PURE__ */ new Set();
@@ -793,12 +1017,12 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
     );
     const takenEdges = new Set(state.roads.map((r) => r.edgeId));
     const prev = /* @__PURE__ */ new Map();
-    const queue = [...sources];
+    const queue = [...sources].filter((v) => !blocked.has(v));
     const seen = new Set(queue);
     while (queue.length) {
       const cur2 = queue.shift();
       if (cur2 === target) break;
-      if (blocked.has(cur2) && !sources.has(cur2)) continue;
+      if (blocked.has(cur2)) continue;
       for (const n of state.board.vertices[cur2].adjacent) {
         if (seen.has(n)) continue;
         const edge = state.board.edges.find(
@@ -826,8 +1050,7 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
     for (const r of RESOURCES) out[r] = 1 + 0.4 * (scarcity[r] - 1);
     return out;
   }
-  const SETUP_NEED = { wheat: 1.3, ore: 1.35, wood: 0.95, brick: 0.95, sheep: 0.8 };
-  const OPENING_NEED = { brick: 1.3, wood: 1.2, wheat: 1.15, sheep: 0.8, ore: 0.75 };
+  const SETUP_NEED = { wheat: 1, ore: 1, wood: 1, brick: 1, sheep: 1 };
   function startingResourcesFor(state, vertexId) {
     const out = Object.fromEntries(RESOURCES.map((r) => [r, 0]));
     for (const hid of state.board.vertices[vertexId].hexIds) {
@@ -835,9 +1058,6 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
       if (h.kind !== "desert") out[h.kind] += 1;
     }
     return out;
-  }
-  function openingValue(res) {
-    return RESOURCES.reduce((s, r) => s + res[r] * OPENING_NEED[r], 0);
   }
   function rankSetupSpots(state, youPlayer, weights, limit = 3) {
     const existing = playerProduction(state, youPlayer);
@@ -867,32 +1087,47 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
         const more = add[r] ?? 0;
         utility += weights[r] * SETUP_NEED[r] * (Math.sqrt(have + more) - Math.sqrt(have));
       }
-      const portBonus = v.port ? v.port.ratio === 2 ? 2.5 + (add[v.port.kind] ?? 0) * 0.4 : 1.5 : 0;
       const covers = RESOURCES.filter((r) => (add[r] ?? 0) > 0 && existing[r] === 0);
       const coverageBonus = covers.reduce((acc, r) => acc + (r === "sheep" ? 1 : 2.5), 0);
-      let score = utility * 3 + portBonus + coverageBonus;
+      let score = utility * 3 + base.pips * 0.5 + coverageBonus;
       const notes = [...base.notes];
       if (haveBuildings && addByToken.size > 0) {
         const merged = new Map(netPipsByToken);
-        let total = 0;
-        for (const n of merged.values()) total += n;
+        let total2 = 0;
+        for (const n of merged.values()) total2 += n;
         for (const [tok, n] of addByToken) {
           merged.set(tok, (merged.get(tok) ?? 0) + n);
-          total += n;
+          total2 += n;
         }
         let topShare = 0;
         let topToken = 0;
         for (const [tok, n] of merged) {
-          if (n / total > topShare) {
-            topShare = n / total;
+          if (n / total2 > topShare) {
+            topShare = n / total2;
             topToken = tok;
           }
         }
         if (topShare > 0.55) {
           const penalty = (topShare - 0.55) * 12;
           score -= penalty;
-          notes.push(`robber-vulnerable: ${(topShare * 100).toFixed(0)}% of pips on the ${topToken}`);
+          notes.push(`correlated income: ${(topShare * 100).toFixed(0)}% of pips on the ${topToken}`);
         }
+      }
+      const allHexPips = /* @__PURE__ */ new Map();
+      for (const b of state.buildings.filter((b2) => b2.player === youPlayer)) for (const hid of state.board.vertices[b.vertexId].hexIds) {
+        allHexPips.set(hid, (allHexPips.get(hid) ?? 0) + pips(state.board.hexes[hid].token));
+      }
+      let repeated = 0;
+      for (const hid of v.hexIds) if (allHexPips.has(hid)) repeated += pips(state.board.hexes[hid].token);
+      score -= repeated * 0.3;
+      if (haveBuildings) {
+        const rate = Object.fromEntries(RESOURCES.map((r) => [r, (existing[r] + (add[r] ?? 0) / 36) * 2]));
+        const payout = startingResourcesFor(state, v.id);
+        const wait = Math.min(
+          turnsToAfford(BUILD.city, payout, rate),
+          turnsToAfford({ wood: 2, brick: 2, sheep: 1, wheat: 1 }, payout, rate)
+        );
+        score += 3 / (1 + wait);
       }
       if (covers.length && state.buildings.some((b) => b.player === youPlayer)) notes.push(`adds ${covers.join("+")} you lack`);
       return { ...base, score, notes };
@@ -923,7 +1158,7 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
   function isContested(state, you, target, ourDist) {
     return opponentDistance(state, you, target) <= ourDist;
   }
-  function advisePlacement(state, youPlayer) {
+  function advisePlacement(state, youPlayer, playerCount = 2) {
     if (youPlayer === null) {
       const top = rankVertices(state, placementWeights(state.board), 3);
       return {
@@ -957,23 +1192,23 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
       const top = rankSetupSpots(state, youPlayer, base, 3);
       const mineCount = yourBuildings.length;
       const oppCount = state.buildings.length - mineCount;
-      if (mineCount === 0 && oppCount === 1) {
-        const pool2 = rankSetupSpots(state, youPlayer, base, 6);
+      if (playerCount === 2 && mineCount === 0 && oppCount === 1) {
+        const pool2 = rankSetupSpots(state, youPlayer, base, Infinity);
         let bestPair = null;
-        for (let i = 0; i < pool2.length; i++) {
-          for (let j = i + 1; j < pool2.length; j++) {
-            const combined = pool2[i].score + pool2[j].score;
-            if (!bestPair || combined > bestPair.score) {
-              bestPair = { first: pool2[i], second: pool2[j], score: combined };
-            }
+        for (const first of pool2) {
+          const trial = { ...state, buildings: [
+            ...state.buildings,
+            { player: youPlayer, vertexId: first.vertexId, kind: "settlement" }
+          ] };
+          const seconds = rankSetupSpots(trial, youPlayer, base, Infinity);
+          for (const second of seconds) {
+            const combined = first.score + second.score;
+            if (!bestPair || combined > bestPair.score) bestPair = { first, second, score: combined };
           }
         }
         if (bestPair) {
-          const openFirst = openingValue(startingResourcesFor(state, bestPair.first.vertexId));
-          const openSecond = openingValue(startingResourcesFor(state, bestPair.second.vertexId));
-          const paysFirst = openFirst > openSecond;
-          const nowSpot = paysFirst ? bestPair.second : bestPair.first;
-          const paySpot = paysFirst ? bestPair.first : bestPair.second;
+          const nowSpot = bestPair.first;
+          const paySpot = bestPair.second;
           return {
             phase: "setup",
             heading: "You place TWICE in a row — plan the pair",
@@ -990,7 +1225,7 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
               }
             ],
             roadEdges: [],
-            note: "Going second, your two placements are back-to-back — nothing can be taken in between. Only the 2nd collects resources, so the weaker-opening corner goes first."
+            note: "Going second, your two placements are back-to-back — nothing can be taken in between. Both spots are legal together; the second payout accelerates the first productive build."
           };
         }
       }
@@ -1238,6 +1473,7 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
         playerId,
         hand: emptyHand(),
         uncertainty: 0,
+        trackingHealth: "incomplete",
         settlements: 0,
         cities: 0,
         roads: 0,
@@ -1369,8 +1605,7 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
         if (victim) {
           const v = getPlayer(state, victim);
           v.uncertainty++;
-          const biggest = RESOURCES.reduce((a, b) => v.hand[a] >= v.hand[b] ? a : b);
-          if (v.hand[biggest] > 0) v.hand[biggest]--;
+          v.trackingHealth = "repairing";
         }
         break;
       }
@@ -1423,14 +1658,12 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
   }
   function reconcileHandWithTotal(p) {
     if (p.serverCards === null) return;
-    let total = handTotal(p);
-    while (total > p.serverCards) {
-      const biggest = RESOURCES.reduce((a, b) => p.hand[a] >= p.hand[b] ? a : b);
-      if (p.hand[biggest] === 0) break;
-      p.hand[biggest]--;
-      total--;
+    const mismatch = Math.abs(p.serverCards - handTotal(p));
+    if (mismatch > 0) {
+      p.uncertainty = Math.max(p.uncertainty, mismatch);
+      p.trackingHealth = "repairing";
+      p.trackingReason = "Resource ledger and server total disagree";
     }
-    p.uncertainty = Math.max(0, p.serverCards - total);
   }
   function visibleVp(p) {
     return p.serverVp ?? p.settlements + p.cities * 2;
@@ -1629,14 +1862,14 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
     const p = state.players.get(name);
     if (!p) return [];
     const prod = expectedProduction(p);
-    const total = productionTotal(prod);
+    const total2 = productionTotal(prod);
     const fits = STRATEGIES.map((strategy, i) => {
       const rationale = [];
       let score = 0;
       for (const r of RESOURCES) score += prod[r] * strategy.weights[r] * 36;
       const keyRes = RESOURCES.filter((r) => strategy.weights[r] >= 1.4);
-      if (keyRes.length > 0 && total > 0) {
-        const keyShare = keyRes.reduce((s, r) => s + prod[r], 0) / total;
+      if (keyRes.length > 0 && total2 > 0) {
+        const keyShare = keyRes.reduce((s, r) => s + prod[r], 0) / total2;
         if (keyShare >= 0.45) {
           rationale.push(`${Math.round(keyShare * 100)}% of your income is ${keyRes.join("+")}`);
         } else {
@@ -1777,15 +2010,15 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
     }
     return tips;
   }
-  function planDiscard(hand, count, fit) {
-    const keep = fit ? { ...BUILD_COSTS$1[fit.strategy.buildOrder[0]] } : {};
+  function planDiscard(hand, count, fit, reserve, weights) {
+    const keep = reserve ?? (fit ? { ...BUILD_COSTS$1[fit.strategy.buildOrder[0]] } : {});
     const pool = { ...hand };
     const out = {};
     for (let i = 0; i < count; i++) {
       const avail = RESOURCES.filter((r) => pool[r] > 0);
       if (avail.length === 0) break;
       const pick = avail.sort(
-        (a, b) => pool[b] - (keep[b] ?? 0) - (pool[a] - (keep[a] ?? 0)) || (fit ? fit.strategy.weights[a] - fit.strategy.weights[b] : 0)
+        (a, b) => pool[b] - (keep[b] ?? 0) - (pool[a] - (keep[a] ?? 0)) || (weights ? weights[a] - weights[b] : fit ? fit.strategy.weights[a] - fit.strategy.weights[b] : 0)
       )[0];
       pool[pick]--;
       out[pick] = (out[pick] ?? 0) + 1;
@@ -1797,10 +2030,10 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
     if (!p || !fit) return [];
     const actions = [];
     const hand = { ...p.hand };
-    const total = RESOURCES.reduce((s, r) => s + hand[r], 0);
-    if (total > state.discardLimit) {
+    const total2 = RESOURCES.reduce((s, r) => s + hand[r], 0);
+    if (total2 > state.discardLimit) {
       const keepFor = fit.strategy.buildOrder[0];
-      const plan = planDiscard(hand, Math.floor(total / 2), fit);
+      const plan = planDiscard(hand, Math.floor(total2 / 2), fit);
       actions.push({
         text: `If a 7 rolls, discard ${Object.entries(plan).map(([r, n]) => `${n} ${r}`).join(" + ")} — keep the makings of a ${keepFor}.`,
         primary: false
@@ -1869,6 +2102,400 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
       });
     }
     return actions;
+  }
+  const zeroHand = () => ({ wood: 0, brick: 0, sheep: 0, wheat: 0, ore: 0 });
+  function planningAdvice(advice, planning, state) {
+    var _a, _b, _c;
+    if (advice.phase === "setup") return advice;
+    const settlements = planning.builds.filter((b) => b.kind === "settlement" && b.vertexId !== void 0).slice(0, 3);
+    const target = ((_a = planning.builds[0]) == null ? void 0 : _a.kind) === "road" ? planning.builds[0] : settlements[0];
+    return {
+      ...advice,
+      heading: "Expansion within the remaining game",
+      spots: settlements.map((b, i) => ({
+        vertexId: b.vertexId,
+        rank: i + 1,
+        label: describeVertex(state, b.vertexId)
+      })),
+      roadEdges: ((_b = target == null ? void 0 : target.roadEdges) == null ? void 0 : _b.slice(0, 2)) ?? [],
+      roadPathLength: ((_c = target == null ? void 0 : target.roadEdges) == null ? void 0 : _c.length) ?? 0,
+      note: target ? `~${planning.horizon.turns.toFixed(1)} turns of useful production remain in the race estimate.` : null,
+      race: void 0
+    };
+  }
+  function vertexIncome(state, vertexId, rolls = 2) {
+    const result = zeroHand();
+    for (const id of state.board.vertices[vertexId].hexIds) {
+      const h = state.board.hexes[id];
+      if (h.kind !== "desert") result[h.kind] += pips(h.token) / 36 * rolls;
+    }
+    return result;
+  }
+  function settlementRoutes(state, player) {
+    const network = new Set(state.roads.filter((r) => r.player === player).flatMap((r) => [state.board.edges[r.edgeId].a, state.board.edges[r.edgeId].b]));
+    return state.board.vertices.filter((v) => isVertexBuildable(state, v.id)).flatMap((v) => {
+      const edges = roadPathTo(state, player, v.id);
+      return edges.length || network.has(v.id) ? [{ vertexId: v.id, edges, conflicts: v.adjacent, production: vertexIncome(state, v.id, 1) }] : [];
+    });
+  }
+  function longestRoad(state, player) {
+    const edges = state.roads.filter((r) => r.player === player).map((r) => state.board.edges[r.edgeId]);
+    const blocked = new Set(state.buildings.filter((b) => b.player !== player).map((b) => b.vertexId));
+    const walk = (v, used) => {
+      if (used.size && blocked.has(v)) return used.size;
+      let best = used.size;
+      for (const edge of edges) if (!used.has(edge.id) && (edge.a === v || edge.b === v)) {
+        used.add(edge.id);
+        best = Math.max(best, walk(edge.a === v ? edge.b : edge.a, used));
+        used.delete(edge.id);
+      }
+      return best;
+    };
+    return Math.max(0, ...[...new Set(edges.flatMap((e) => [e.a, e.b]))].map((v) => walk(v, /* @__PURE__ */ new Set())));
+  }
+  function roadBonusPath(state, player, target, supply) {
+    let frontier = [[]];
+    const occupied = new Set(state.roads.map((r) => r.edgeId));
+    const blocked = new Set(state.buildings.filter((b) => b.player !== player).map((b) => b.vertexId));
+    for (let depth = 0; depth <= Math.min(3, supply); depth++) {
+      const next = [];
+      for (const path of frontier) {
+        const trial = { ...state, roads: [...state.roads, ...path.map((edgeId) => ({ edgeId, player }))] };
+        const length = longestRoad(trial, player);
+        if (length >= target) return path;
+        const nodes = new Set(trial.roads.filter((r) => r.player === player).flatMap((r) => [state.board.edges[r.edgeId].a, state.board.edges[r.edgeId].b]));
+        for (const b of state.buildings) if (b.player === player) nodes.add(b.vertexId);
+        for (const edge of state.board.edges) if (!occupied.has(edge.id) && !path.includes(edge.id) && (nodes.has(edge.a) && !blocked.has(edge.a) || nodes.has(edge.b) && !blocked.has(edge.b))) {
+          next.push({ path: [...path, edge.id], length });
+        }
+      }
+      const seen = /* @__PURE__ */ new Set();
+      frontier = next.sort((a, b) => b.length - a.length).filter((x) => {
+        const key = [...x.path].sort((a, b) => a - b).join(",");
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      }).slice(0, 32).map((x) => x.path);
+    }
+    return null;
+  }
+  function planPosition(tracker2, youName, gs, opts = {}) {
+    var _a, _b;
+    const target = opts.target ?? 10;
+    const rolls = Math.max(2, tracker2.players.size);
+    const you = tracker2.players.get(youName);
+    const ids = [...tracker2.players.keys()];
+    const inputs = opts.inputs ?? [...tracker2.players.values()].map((p) => {
+      const player = p.name === youName ? gs == null ? void 0 : gs.youPlayer : gs && gs.youPlayer !== null && tracker2.players.size === 2 ? gs.youPlayer === 0 ? 1 : 0 : ids.indexOf(p.name);
+      const own = !!gs && player !== null && player !== void 0 ? gs.state.buildings.filter((b) => b.player === player) : [];
+      const ownRoads = gs && player !== null && player !== void 0 ? gs.state.roads.filter((r) => r.player === player).length : p.roads;
+      const routes = gs && player !== null && player !== void 0 ? settlementRoutes(gs.state, player) : void 0;
+      return {
+        name: p.name,
+        playerId: player ?? void 0,
+        isYou: p.name === youName,
+        publicVp: visibleVp(p),
+        hiddenVp: p.name === youName ? opts.hiddenVp ?? 0 : Math.min(5, p.devCards * 0.2),
+        settlementsLeft: p.name === youName && opts.pieces ? opts.pieces.settlements : Math.max(0, 5 - p.settlements),
+        citiesLeft: p.name === youName && opts.pieces ? opts.pieces.cities : Math.max(0, 4 - p.cities),
+        roadsLeft: p.name === youName && opts.pieces ? opts.pieces.roads : Math.max(0, 15 - ownRoads),
+        settlementsOnBoard: gs ? own.filter((b) => b.kind === "settlement").length : p.settlements,
+        settlementSpotOpen: (routes == null ? void 0 : routes.some((r) => r.edges.length === 0)) ?? false,
+        settlementRoutes: routes,
+        knightsPlayed: p.knightsPlayed,
+        knightsInHand: p.name === youName ? opts.knightsInHand : 0,
+        playableKnights: p.name === youName ? opts.playableKnights : 0,
+        longestRoadLen: gs && player !== null && player !== void 0 ? longestRoad(gs.state, player) : 0,
+        hand: p.hand,
+        production: gs && player !== null && player !== void 0 ? playerProduction(gs.state, player) : expectedProduction(p),
+        cityProduction: gs ? own.filter((b) => b.kind === "settlement").map((b) => vertexIncome(gs.state, b.vertexId, 1)) : void 0,
+        bankRatios: p.bankRatio,
+        rollsPerTurn: rolls
+      };
+    });
+    const mostKnights = Math.max(0, ...inputs.map((p) => p.knightsPlayed));
+    const mostRoads = Math.max(0, ...inputs.map((p) => p.longestRoadLen));
+    for (const p of inputs) {
+      p.holdsLargestArmy ?? (p.holdsLargestArmy = mostKnights >= 3 && p.knightsPlayed === mostKnights && inputs.filter((x) => x.knightsPlayed === mostKnights).length === 1);
+      p.holdsLongestRoad ?? (p.holdsLongestRoad = mostRoads >= 5 && p.longestRoadLen === mostRoads && inputs.filter((x) => x.longestRoadLen === mostRoads).length === 1);
+    }
+    const victories = analyzeVictory(inputs, { target, devDeckLeft: opts.devDeckLeft ?? null });
+    const horizon = gameHorizon(victories.map((v) => v.turnsToWin));
+    const me = inputs.find((p) => p.isYou);
+    const victory = victories.find((p) => p.isYou);
+    const paidRoads = /* @__PURE__ */ new Set();
+    const remaining = (victory == null ? void 0 : victory.steps.reduce((cost, step) => {
+      for (const r of RESOURCES) cost[r] = (cost[r] ?? 0) + (step.cost[r] ?? 0);
+      for (const id of step.roadEdges ?? []) {
+        if (paidRoads.has(id)) {
+          cost.wood = (cost.wood ?? 0) - 1;
+          cost.brick = (cost.brick ?? 0) - 1;
+        }
+        paidRoads.add(id);
+      }
+      return cost;
+    }, {})) ?? {};
+    const production = Object.fromEntries(RESOURCES.map((r) => [r, me.production[r] * rolls]));
+    const gap = Math.max(0, target - me.publicVp - (me.hiddenVp ?? 0));
+    const options = [];
+    if (gs && gs.youPlayer !== null) {
+      if ((me.citiesLeft ?? 0) > 0) {
+        for (const b of gs.state.buildings) if (b.player === gs.youPlayer && b.kind === "settlement") {
+          options.push({ kind: "city", vp: 1, cost: BUILD.city, production: vertexIncome(gs.state, b.vertexId, rolls), vertexId: b.vertexId });
+        }
+      }
+      if ((me.settlementsLeft ?? 0) > 0) for (const route of me.settlementRoutes ?? settlementRoutes(gs.state, gs.youPlayer)) {
+        if (route.edges.length > (me.roadsLeft ?? 0)) continue;
+        const ratios = { ...you.bankRatio };
+        const port = gs.state.board.vertices[route.vertexId].port;
+        if (port) {
+          for (const r of RESOURCES) if (port.kind === "any" || port.kind === r) ratios[r] = Math.min(ratios[r] ?? 4, port.ratio);
+        }
+        options.push({
+          kind: "settlement",
+          vp: 1,
+          cost: { wood: 1 + route.edges.length, brick: 1 + route.edges.length, wheat: 1, sheep: 1 },
+          production: vertexIncome(gs.state, route.vertexId, rolls),
+          vertexId: route.vertexId,
+          roadEdges: route.edges,
+          ratios
+        });
+      }
+      if (((_a = me.longestRoadPath) == null ? void 0 : _a.length) && !me.holdsLongestRoad) options.push({
+        kind: "road",
+        vp: 2,
+        cost: { wood: me.longestRoadPath.length, brick: me.longestRoadPath.length },
+        production: zeroHand(),
+        roadEdges: me.longestRoadPath
+      });
+    }
+    if (!gs && me.settlementsOnBoard > 0 && (me.citiesLeft ?? 0) > 0) {
+      options.push({
+        kind: "city",
+        cost: BUILD.city,
+        vp: 1,
+        production: Object.fromEntries(RESOURCES.map((r) => [r, production[r] / Math.max(1, me.settlementsOnBoard)]))
+      });
+    }
+    if (opts.devDeckLeft !== 0) {
+      const leader = Math.max(2, ...inputs.map((p) => p.knightsPlayed));
+      const needed = Math.max(1, leader + 1 - me.knightsPlayed - (me.knightsInHand ?? 0));
+      const armyValue = me.holdsLargestArmy ? 0 : 14 / 25 * 2 / needed * horizon.turns / (horizon.turns + needed);
+      const unblocking = zeroHand();
+      if (opts.robberHex && gs && gs.youPlayer !== null && !opts.knightsInHand) {
+        const hex = gs.state.board.hexes.find((h) => h.q === opts.robberHex.x && h.r === opts.robberHex.y);
+        if (hex && hex.kind !== "desert") {
+          const units = gs.state.buildings.filter((b) => b.player === gs.youPlayer && gs.state.board.vertices[b.vertexId].hexIds.includes(hex.id)).reduce((n, b) => n + (b.kind === "city" ? 2 : 1), 0);
+          const duration = Math.max(0, Math.min(horizon.turns, 3) - 1);
+          unblocking[hex.kind] = pips(hex.token) / 36 * rolls * units * (14 / 25) * duration / Math.max(1, horizon.turns);
+        }
+      }
+      options.push({ kind: "dev", cost: BUILD.dev, vp: 5 / 25 + armyValue, production: unblocking });
+    }
+    const builds = evaluateBuilds(options, you.hand, production, you.bankRatio, remaining, gap, horizon);
+    const reserve = ((_b = builds[0]) == null ? void 0 : _b.cost) ?? remaining;
+    const weights = Object.fromEntries(RESOURCES.map((r) => [
+      r,
+      1 + Math.max(0, (reserve[r] ?? 0) - you.hand[r]) / (1 + production[r] * horizon.turns)
+    ]));
+    return { horizon, inputs, victories, options, builds, remaining, weights, production, gap };
+  }
+  const ALT_TO_RESOURCE = {
+    grain: "wheat",
+    wool: "sheep",
+    lumber: "wood",
+    brick: "brick",
+    ore: "ore"
+  };
+  const RESOURCE_IMG_SELECTOR = Object.keys(ALT_TO_RESOURCE).flatMap((a) => [`img[alt="${a}"]`, `img[alt="${cap(a)}"]`]).join(", ");
+  function cap(s) {
+    return s.charAt(0).toUpperCase() + s.slice(1);
+  }
+  function resourceFromAlt(alt) {
+    if (!alt) return null;
+    return ALT_TO_RESOURCE[alt.toLowerCase()] ?? null;
+  }
+  function getPlayerName(el) {
+    var _a;
+    const span = el.querySelector(
+      'span[style*="font-weight:600"], span[style*="font-weight: 600"]'
+    );
+    return ((_a = span == null ? void 0 : span.textContent) == null ? void 0 : _a.trim()) || null;
+  }
+  function getPlayerColor(el) {
+    const span = el.querySelector(
+      'span[style*="font-weight:600"], span[style*="font-weight: 600"]'
+    );
+    return (span == null ? void 0 : span.style.color) || "#888";
+  }
+  function getSecondPlayerName(el) {
+    var _a;
+    const spans = el.querySelectorAll(
+      'span[style*="font-weight:600"], span[style*="font-weight: 600"]'
+    );
+    return spans.length > 1 ? ((_a = spans[1].textContent) == null ? void 0 : _a.trim()) || null : null;
+  }
+  function countResources(root) {
+    const out = {};
+    root.querySelectorAll(RESOURCE_IMG_SELECTOR).forEach((img) => {
+      const res = resourceFromAlt(img.getAttribute("alt"));
+      if (res) out[res] = (out[res] ?? 0) + 1;
+    });
+    return out;
+  }
+  function countAroundMarker(el, marker) {
+    const html = el.innerHTML;
+    const idx = html.indexOf(marker);
+    if (idx === -1) return null;
+    const mk = (fragment) => {
+      const div = el.ownerDocument.createElement("div");
+      div.innerHTML = fragment;
+      return countResources(div);
+    };
+    return { before: mk(html.slice(0, idx)), after: mk(html.slice(idx + marker.length)) };
+  }
+  function sum(d) {
+    return Object.values(d).reduce((s, n) => s + (n ?? 0), 0);
+  }
+  function negate(d) {
+    const out = {};
+    for (const [k, v] of Object.entries(d)) out[k] = -(v ?? 0);
+    return out;
+  }
+  function merge(a, b) {
+    const out = { ...a };
+    for (const [k, v] of Object.entries(b)) {
+      out[k] = (out[k] ?? 0) + (v ?? 0);
+    }
+    return out;
+  }
+  function hasImg(el, names) {
+    return names.some(
+      (n) => el.querySelector(`img[alt="${n}"], img[alt="${cap(n)}"]`)
+    );
+  }
+  function parseLogRow(el) {
+    var _a;
+    const text = ((_a = el.textContent) == null ? void 0 : _a.replace(/\s+/g, " ").trim()) || "";
+    const player = getPlayerName(el);
+    if (!text || text.includes("has disconnected") || text.includes("has reconnected") || text.includes("will take over") || text.includes("left the game") || text.includes("Learn how to play") || el.querySelector("hr")) {
+      return { type: "ignored" };
+    }
+    if (text.includes("won the game")) {
+      return { type: "game-over", winner: player };
+    }
+    if (text.includes("rolled")) {
+      const dice = el.querySelectorAll('img[alt^="dice_"]');
+      if (dice.length === 2 && player) {
+        const total2 = parseInt(dice[0].getAttribute("alt").replace("dice_", ""), 10) + parseInt(dice[1].getAttribute("alt").replace("dice_", ""), 10);
+        return { type: "roll", player, total: total2 };
+      }
+      return { type: "ignored" };
+    }
+    if (text.includes("blocked by the Robber")) {
+      const probImg = el.querySelector('img[alt^="prob_"]');
+      const tileImg = el.querySelector('img[alt$=" tile"]');
+      const total2 = probImg ? parseInt(probImg.getAttribute("alt").replace("prob_", ""), 10) : NaN;
+      const res = tileImg ? resourceFromAlt(tileImg.getAttribute("alt").replace(" tile", "")) : null;
+      if (!Number.isNaN(total2) && res) return { type: "blocked-roll", total: total2, resource: res };
+      return { type: "ignored" };
+    }
+    if (text.includes("received starting resources") && player) {
+      return { type: "starting-resources", player, resources: countResources(el) };
+    }
+    if (text.includes("placed a") && player) {
+      if (hasImg(el, ["settlement"])) {
+        return { type: "place", player, color: getPlayerColor(el), what: "settlement" };
+      }
+      if (hasImg(el, ["road"])) {
+        return { type: "place", player, color: getPlayerColor(el), what: "road" };
+      }
+      if (hasImg(el, ["city"])) {
+        return { type: "place", player, color: getPlayerColor(el), what: "city" };
+      }
+    }
+    if (text.includes("built a") && player) {
+      if (hasImg(el, ["settlement"])) return { type: "build", player, what: "settlement" };
+      if (hasImg(el, ["city"])) return { type: "build", player, what: "city" };
+      if (hasImg(el, ["road"])) return { type: "build", player, what: "road" };
+    }
+    if (text.includes("bought") && el.querySelector(
+      'img[alt="development card"], img[alt="Development card"], img[alt="Development Card"]'
+    ) && player) {
+      return { type: "buy-dev", player };
+    }
+    if (text.includes("gave bank") && text.includes("took") && player) {
+      const parts = countAroundMarker(el, " and took ");
+      if (parts) {
+        return {
+          type: "bank-trade",
+          player,
+          delta: merge(negate(parts.before), parts.after),
+          gave: sum(parts.before),
+          took: sum(parts.after)
+        };
+      }
+    }
+    if (text.includes("gave") && text.includes("got") && text.includes("from")) {
+      const html = el.innerHTML;
+      const gotIdx = html.indexOf(" and got ");
+      const fromIdx = html.lastIndexOf(" from ");
+      if (gotIdx !== -1 && fromIdx > gotIdx && player) {
+        const mk = (fragment) => {
+          const div = el.ownerDocument.createElement("div");
+          div.innerHTML = fragment;
+          return countResources(div);
+        };
+        const gave = mk(html.slice(0, gotIdx));
+        const got = mk(html.slice(gotIdx + " and got ".length, fromIdx));
+        return {
+          type: "player-trade",
+          player,
+          partner: getSecondPlayerName(el),
+          delta: merge(negate(gave), got)
+        };
+      }
+    }
+    if (/stole \d+/.test(text) && player) {
+      const res = countResources(el);
+      const kind = Object.keys(res)[0];
+      const m = text.match(/stole (\d+)/);
+      if (kind && m) {
+        return { type: "monopoly-steal", player, resource: kind, count: parseInt(m[1], 10) };
+      }
+    }
+    if (text.includes("stole") && text.includes("from")) {
+      const res = countResources(el);
+      const kind = Object.keys(res)[0] ?? null;
+      const isYouThief = /^You stole/i.test(text);
+      const isYouVictim = / from you/i.test(text);
+      const first = player;
+      const second = getSecondPlayerName(el);
+      const thief = isYouThief ? null : first;
+      const victim = isYouVictim ? null : isYouThief ? first : second;
+      if (kind) return { type: "steal-known", thief, victim, resource: kind };
+      return { type: "steal-unknown", thief, victim };
+    }
+    if (text.includes("took from bank") && player) {
+      return { type: "take-from-bank", player, resources: countResources(el) };
+    }
+    if (text.includes("discarded") && player) {
+      return { type: "discard", player, resources: countResources(el) };
+    }
+    if (text.includes("used") && player) {
+      if (text.includes("Knight")) return { type: "use-knight", player };
+      if (text.includes("Year of Plenty")) return { type: "use-dev", player, card: "year-of-plenty" };
+      if (text.includes("Road Building")) return { type: "use-dev", player, card: "road-building" };
+      if (text.includes("Monopoly")) return { type: "use-dev", player, card: "monopoly" };
+    }
+    if (text.includes("moved Robber") && player) {
+      return { type: "move-robber", player };
+    }
+    if (text.includes("got") && player) {
+      const resources = countResources(el);
+      if (sum(resources) > 0) return { type: "got", player, resources };
+    }
+    return { type: "ignored" };
   }
   const SQRT3 = Math.sqrt(3);
   function faceFromCenter(cx, cy) {
@@ -2086,8 +2713,8 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
       reason: `${sweeten ? 2 : 1} ${surplus[0]} for the ${need} our next build is short of`
     };
   }
-  function planCosts(fit, vp, target = 10) {
-    const order = vp < target - 2 ? ["settlement", "city"] : fit ? fit.strategy.buildOrder.filter((i) => i !== "road") : ["city", "settlement"];
+  function planCosts(fit, _vp, _target = 10) {
+    const order = fit ? fit.strategy.buildOrder.filter((i) => i !== "road") : ["city", "settlement"];
     return order.map((i) => BUILD_COSTS[i]);
   }
   const BUILD_COSTS = {
@@ -2195,50 +2822,6 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
     }
     return best ? { give: best.give, get: need, giveCount: best.ratio } : null;
   }
-  function planBankTrade(hand, ratios, fit, canBuild = () => true) {
-    for (const item of fit.strategy.buildOrder) {
-      if (!canBuild(item)) continue;
-      const cost = BUILD_COSTS[item];
-      const short = RESOURCES.some((r) => (cost[r] ?? 0) > hand[r]);
-      if (!short) return null;
-      const trade = tradeTowardCost(hand, ratios, cost, fit.strategy.weights);
-      if (trade) return trade;
-    }
-    return null;
-  }
-  function tradeSurplusToAvoidDiscard(hand, ratios, weights, limit, order, fundingTarget, dist = 2) {
-    const total = RESOURCES.reduce((s, r) => s + hand[r], 0);
-    if (total < limit - dist) return null;
-    const spatialItems = ["settlement", "city", "road"];
-    let need = null;
-    let needGap = 0;
-    for (const item of order) {
-      if (!spatialItems.includes(item)) continue;
-      const cost = fundingTarget(item);
-      if (!cost) continue;
-      for (const r of RESOURCES) {
-        const gap = (cost[r] ?? 0) - hand[r];
-        if (gap > needGap) {
-          needGap = gap;
-          need = r;
-        }
-      }
-      if (need) break;
-    }
-    if (!need) return null;
-    const surpluses = [];
-    for (const r of RESOURCES) {
-      const ratio2 = ratios[r] ?? 4;
-      if (hand[r] >= ratio2 && r !== need) surpluses.push({ resource: r, count: hand[r], ratio: ratio2 });
-    }
-    if (surpluses.length === 0) return null;
-    surpluses.sort(
-      (a, b) => a.ratio - b.ratio || weights[a.resource] - weights[b.resource]
-    );
-    const give = surpluses[0].resource;
-    const ratio = surpluses[0].ratio;
-    return { give, get: need, giveCount: ratio };
-  }
   function cardsToIds(cards) {
     const ids = [];
     for (const [r, n] of Object.entries(cards)) {
@@ -2249,25 +2832,8 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
   function describeCards(cards) {
     return Object.entries(cards).map(([r, n]) => `${n} ${r}`).join(" + ");
   }
-  function opponentStarveResource(state, oppPlayer) {
-    const prod = playerProduction(state, oppPlayer);
-    let worst = null;
-    let worstVal = Infinity;
-    for (const r of RESOURCES) {
-      if (prod[r] > 0 && prod[r] < worstVal) {
-        worstVal = prod[r];
-        worst = r;
-      }
-    }
-    return worst;
-  }
-  function riskModeOf(probability) {
-    if (probability <= 0.35) return "lotto";
-    if (probability >= 0.65) return "protect";
-    return "neutral";
-  }
-  function bestRobberHex(state, youPlayer, current, canRob = () => true, probOf, starve) {
-    var _a;
+  function bestRobberHex(state, youPlayer, current, canRob = () => true, probOf, starve, planning) {
+    var _a, _b, _c;
     const oppOnTile = (hexId) => state.buildings.filter(
       (b) => b.player !== youPlayer && state.board.vertices[b.vertexId].hexIds.includes(hexId)
     );
@@ -2285,21 +2851,35 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
       let mine = 0;
       for (const b of state.buildings) {
         if (!state.board.vertices[b.vertexId].hexIds.includes(hex.id)) continue;
-        const value = combosOf(hex.token) * (b.kind === "city" ? 2 : 1) * (starve && hex.kind === starve ? 1.4 : 1);
+        const value = combosOf(hex.token) * (b.kind === "city" ? 2 : 1) * (!planning && starve && hex.kind === starve ? 1.4 : 1);
         if (b.player === youPlayer) mine += value;
         else opp += value;
       }
-      const score = opp - mine * 1.5;
+      let bottleneck = 0;
+      if (planning) for (const input of planning.inputs.filter((p) => !p.isYou)) {
+        const pid = input.playerId;
+        if (pid === void 0) continue;
+        const units = state.buildings.filter((b) => b.player === pid && state.board.vertices[b.vertexId].hexIds.includes(hex.id)).reduce((s, b) => s + (b.kind === "city" ? 2 : 1), 0);
+        if (!units) continue;
+        const goal = ((_b = (_a = planning.victories.find((p) => p.name === input.name)) == null ? void 0 : _a.steps[0]) == null ? void 0 : _b.cost) ?? BUILD_COSTS.city;
+        const rate = Object.fromEntries(RESOURCES.map((r) => [r, input.production[r] * (input.rollsPerTurn ?? 2)]));
+        const blocked = { ...rate, [hex.kind]: Math.max(0, rate[hex.kind] - pips(hex.token) / 36 * units * (input.rollsPerTurn ?? 2)) };
+        const before = turnsToAfford(goal, input.hand, rate, input.bankRatios);
+        const after = turnsToAfford(goal, input.hand, blocked, input.bankRatios);
+        const horizon = planning.horizon.turns + 1;
+        const delay = Number.isFinite(before) ? Math.max(0, after - before) : 0;
+        bottleneck += Number.isFinite(delay) ? 6 * delay / (horizon + delay) : 6;
+      }
+      const score = opp - mine * 1.5 + bottleneck;
       if (opp > 0 && (!best || score > best.score)) best = { score, hexId: hex.id };
     }
     if (best) {
       const hex = state.board.hexes[best.hexId];
-      const victim = ((_a = oppOnTile(best.hexId)[0]) == null ? void 0 : _a.player) ?? null;
-      const starving = starve && hex.kind === starve;
+      const victim = ((_c = oppOnTile(best.hexId)[0]) == null ? void 0 : _c.player) ?? null;
       return {
         hex: { x: hex.q, y: hex.r },
         victim,
-        describe: `robber to the ${hex.token}-${hex.kind} tile${starving ? ` — starving their ${hex.kind} choke` : ""}`
+        describe: `robber to the ${hex.token}-${hex.kind} tile${""}`
       };
     }
     const oppPlayers = new Set(
@@ -2406,6 +2986,7 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
     return best;
   }
   function decideNext(opts) {
+    var _a, _b, _c, _d, _e;
     const { tracker: tracker2, youName, fit, gs, advice, rolledThisTurn, robberPending, robberHex, discardPending } = opts;
     const you = tracker2.players.get(youName);
     if (!you) return null;
@@ -2413,23 +2994,19 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
     const board = (gs == null ? void 0 : gs.state.board) ?? null;
     const limit = opts.discardLimit ?? tracker2.discardLimit;
     const handSize = handTotal(you);
-    const opponents = [...tracker2.players.values()].filter((p) => p.name !== youName);
-    const mainOpponent = opponents.reduce((a, b) => visibleVp(b) > visibleVp(a) ? b : a, opponents[0]);
-    const oppDevInference = mainOpponent ? inferOpponentDevCards(mainOpponent, robberHex ?? null, tracker2, board, (gs == null ? void 0 : gs.state.buildings) ?? null) : { likelyMonopoly: false, confidence: 0 };
-    const winProb = mainOpponent && board ? estimateWinProbability(you, mainOpponent, tracker2, board, robberHex ?? null, (gs == null ? void 0 : gs.state.buildings) ?? null) : { probability: 0.5 };
-    const riskMode = riskModeOf(winProb.probability);
-    const starveResource = (() => {
-      if (!board || !mainOpponent || (gs == null ? void 0 : gs.youPlayer) === null || gs === null) return null;
-      const oppId = mainOpponent.playerId ?? colonistIdForColor(mainOpponent.color);
-      if (oppId === null) return null;
-      return opponentStarveResource(gs.state, oppId);
-    })();
+    const planning = opts.planning ?? planPosition(tracker2, youName, gs, {
+      target: opts.winTarget,
+      robberHex: opts.robberHex,
+      hiddenVp: opts.vpCardsHeld,
+      pieces: opts.piecesLeft,
+      devDeckLeft: opts.bankDevCards,
+      knightsInHand: opts.knightAvailable ? 1 : 0,
+      playableKnights: opts.knightAvailable ? 1 : 0
+    });
     const deck = deckStatus(tracker2);
     const probOf = (n) => deck.prob.get(n) ?? pips(n) / 36;
-    const base7 = 6 / 36;
-    const p7next = probOf(7);
     if (discardPending && handSize > limit) {
-      const cards = planDiscard(you.hand, Math.floor(handSize / 2), fit);
+      const cards = planDiscard(you.hand, Math.floor(handSize / 2), fit, (_a = planning.builds[0]) == null ? void 0 : _a.cost, planning.weights);
       return {
         kind: "discard",
         cards,
@@ -2437,7 +3014,7 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
       };
     }
     if (robberPending && gs && gs.youPlayer !== null && board) {
-      const target = bestRobberHex(gs.state, gs.youPlayer, robberHex ?? null, opts.canRob, probOf, starveResource);
+      const target = bestRobberHex(gs.state, gs.youPlayer, robberHex ?? null, opts.canRob, probOf, void 0, planning);
       if (target) {
         return {
           kind: "move-robber",
@@ -2447,8 +3024,15 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
       }
       return null;
     }
+    const freeRoadChoices = (count) => evaluateBuilds(planning.options.filter((b) => {
+      var _a2;
+      return (_a2 = b.roadEdges) == null ? void 0 : _a2.length;
+    }).map((b) => {
+      const free = Math.min(count, b.roadEdges.length);
+      return { ...b, cost: { ...b.cost, wood: (b.cost.wood ?? 0) - free, brick: (b.cost.brick ?? 0) - free } };
+    }), you.hand, planning.production, you.bankRatio, planning.remaining, planning.gap, planning.horizon);
     if ((opts.freeRoadsPending ?? 0) > 0 && board && gs && gs.youPlayer !== null) {
-      const advised = ((advice == null ? void 0 : advice.roadEdges) ?? []).find(
+      const advised = (((_b = freeRoadChoices(opts.freeRoadsPending)[0]) == null ? void 0 : _b.roadEdges) ?? (advice == null ? void 0 : advice.roadEdges) ?? []).find(
         (id) => !gs.state.roads.some((r) => r.edgeId === id)
       );
       const edgeId = advised ?? bestFreeRoadEdge(gs.state, gs.youPlayer);
@@ -2476,39 +3060,17 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
       return null;
     }
     const knightReason = (() => {
+      var _a2;
       if (!opts.knightAvailable || !allowed("play-knight")) return null;
-      const opponentBlocked = !!robberHex && !!gs && !!board && gs.state.buildings.some(
-        (b) => b.player !== gs.youPlayer && board.vertices[b.vertexId].hexIds.some(
-          (h) => board.hexes[h].q === robberHex.x && board.hexes[h].r === robberHex.y
-        )
-      );
       const blockedMine = !!robberHex && !!gs && gs.youPlayer !== null && !!board && gs.state.buildings.some(
         (b) => b.player === gs.youPlayer && board.vertices[b.vertexId].hexIds.some(
           (h) => board.hexes[h].q === robberHex.x && board.hexes[h].r === robberHex.y
         )
       );
       if (blockedMine) return "the robber is on your tile";
-      if (opponentBlocked && !blockedMine) return null;
-      const unplayedDev = you.devCards - you.knightsPlayed;
-      if (unplayedDev >= 3) return "3+ held dev cards — play knights to chase Largest Army";
-      const myKnights = you.knightsPlayed;
-      const myVp2 = visibleVp(you);
-      const oppMaxKnights = Math.max(
-        0,
-        ...[...tracker2.players.values()].filter((p) => p.name !== youName).map((p) => p.knightsPlayed)
-      );
-      const oppMaxVp = Math.max(
-        0,
-        ...[...tracker2.players.values()].filter((p) => p.name !== youName).map((p) => visibleVp(p))
-      );
-      const youHoldLA = myKnights >= 3 && myKnights > oppMaxKnights;
-      const oppHoldsLA = oppMaxKnights >= 3 && oppMaxKnights > myKnights;
-      const youNearWin = myVp2 >= 8;
-      const oppNearWin = oppMaxVp >= 8;
-      const needLAForWin = youNearWin && !youHoldLA && myKnights >= 2;
-      const mustBlockOppLA = oppNearWin && (oppHoldsLA || oppMaxKnights >= 2) && myKnights < oppMaxKnights + 1;
-      if (needLAForWin) return "Largest Army would win the game";
-      if (mustBlockOppLA) return "must take Largest Army to stop opponent winning with it";
+      const me = planning.inputs.find((p) => p.isYou);
+      const armyStep = (_a2 = planning.victories.find((p) => p.isYou)) == null ? void 0 : _a2.steps.find((s) => s.kind === "largest-army");
+      if (!(me == null ? void 0 : me.holdsLargestArmy) && armyStep) return "advance the planned Largest Army route before its play deadline";
       return null;
     })();
     const overLimit = handSize > limit;
@@ -2517,9 +3079,6 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
     }
     if (!rolledThisTurn) return { kind: "roll", describe: "roll the dice" };
     if (!fit) return null;
-    if (knightReason) {
-      return { kind: "play-knight", describe: `play a knight — ${knightReason}` };
-    }
     const devAvailable = opts.bankDevCards !== 0 && allowed("buy-dev");
     const pieces = opts.piecesLeft;
     const hasPiece = (item) => {
@@ -2527,332 +3086,141 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
       const left = item === "settlement" ? pieces.settlements : item === "city" ? pieces.cities : pieces.roads;
       return left === null || left > 0;
     };
-    const canBuild = (item) => item === "dev" ? devAvailable : hasPiece(item);
+    const canBuild = (item) => item === "dev" ? devAvailable : hasPiece(item) && allowed(item === "city" ? "build-city" : item === "road" ? "build-road" : "build-settlement");
     const afford = (item) => RESOURCES.every((r) => you.hand[r] >= (COSTS[item][r] ?? 0));
+    const choices = planning.builds.filter((b) => canBuild(b.kind));
+    const top = choices[0];
+    const evaluation = {
+      horizon: planning.horizon.turns,
+      gap: planning.gap,
+      alternatives: choices.slice(0, 8).map((b) => ({ kind: b.kind, score: b.score, wait: b.wait, vertexId: b.vertexId }))
+    };
+    const finish = (decision) => ({ ...decision, evaluation });
+    const build = (choice) => {
+      var _a2;
+      if (!affordableWithTrades(you.hand, you.bankRatio, choice.cost)) return null;
+      const trade = tradeTowardCost(you.hand, you.bankRatio, choice.cost, planning.weights);
+      if (trade && allowed("bank-trade")) return {
+        kind: "bank-trade",
+        trade,
+        describe: `bank-trade ${trade.giveCount} ${trade.give} for ${trade.get} to fund ${choice.kind}`
+      };
+      if (trade) return null;
+      if (choice.kind === "dev") return afford("dev") && allowed("buy-dev") ? { kind: "buy-dev", describe: "buy a development card — best progress within the remaining game" } : null;
+      if (!gs || gs.youPlayer === null || !board) return null;
+      const roads = ((_a2 = choice.roadEdges) == null ? void 0 : _a2.filter((id) => !gs.state.roads.some((r) => r.edgeId === id))) ?? [];
+      if (roads.length) {
+        if (!allowed("build-road") || !hasPiece("road")) return null;
+        const edge = board.edges[roads[0]];
+        const coord2 = pixelsToColonistEdge(board.vertices[edge.a], board.vertices[edge.b]);
+        return coord2 ? { kind: "build-road", coord: coord2, describe: `road for funded ${choice.kind === "road" ? "Longest Road" : "settlement claim"}` } : null;
+      }
+      if (choice.vertexId === void 0) return null;
+      const v = board.vertices[choice.vertexId];
+      const coord = pixelToColonistCorner(v.x, v.y);
+      if (!coord) return null;
+      const kind = choice.kind === "city" ? "build-city" : "build-settlement";
+      return allowed(kind) ? { kind, coord, describe: `${choice.kind} — best progress within ~${planning.horizon.turns.toFixed(1)} turns` } : null;
+    };
+    for (const choice of choices.filter((b) => b.kind !== "dev" && b.vp >= planning.gap && b.wait === 0)) {
+      const action = build(choice);
+      if (action) return finish(action);
+    }
+    if (knightReason) return finish({ kind: "play-knight", describe: `play a knight — ${knightReason}` });
     if (opts.hasMonopoly && allowed("play-monopoly")) {
-      const opponents2 = [...tracker2.players.values()].filter((p) => p.name !== youName);
-      const oppCards = opponents2.reduce((s, p) => s + (p.serverCards ?? handTotal(p)), 0);
-      const mainOpp = opponents2.reduce((a, b) => (b.serverCards ?? handTotal(b)) > (a.serverCards ?? handTotal(a)) ? b : a, opponents2[0]);
-      const oppDevInference2 = mainOpp ? inferOpponentDevCards(mainOpp, robberHex ?? null, tracker2, board, (gs == null ? void 0 : gs.state.buildings) ?? null) : { likelyMonopoly: false };
-      if (oppCards >= 5) {
-        const prodByRes = Object.fromEntries(RESOURCES.map((r) => [r, 0]));
-        for (const p of opponents2) {
-          const prod = expectedProduction(p);
-          for (const r of RESOURCES) prodByRes[r] += prod[r];
+      const opponents = [...tracker2.players.values()].filter((p) => p.name !== youName);
+      const scoreHand = (hand, horizon = planning.horizon) => {
+        var _a2;
+        return ((_a2 = evaluateBuilds(planning.options, hand, planning.production, you.bankRatio, planning.remaining, planning.gap, horizon)[0]) == null ? void 0 : _a2.score) ?? 0;
+      };
+      const base = scoreHand(you.hand);
+      const futureHand = Object.fromEntries(RESOURCES.map((r) => [r, you.hand[r] + planning.production[r]]));
+      const laterHorizon = { ...planning.horizon, turns: Math.max(0, planning.horizon.turns - 1) };
+      const futureBase = scoreHand(futureHand, laterHorizon);
+      let best = null;
+      let waitingValue = 0;
+      for (const resource of RESOURCES) {
+        const haul = confirmedMonopolyHaul(tracker2.players.values(), youName, resource);
+        const next = { ...you.hand, [resource]: you.hand[resource] + haul };
+        let delay = 0;
+        let futureHaul = 0;
+        for (const opponent of opponents) {
+          const input = planning.inputs.find((p) => p.name === opponent.name);
+          if (!input) continue;
+          const goal = ((_d = (_c = planning.victories.find((p) => p.name === opponent.name)) == null ? void 0 : _c.steps[0]) == null ? void 0 : _d.cost) ?? BUILD_COSTS.city;
+          const rate = Object.fromEntries(RESOURCES.map((r) => [r, input.production[r] * (input.rollsPerTurn ?? 2)]));
+          const before = turnsToAfford(goal, opponent.hand, rate, opponent.bankRatio);
+          const after = turnsToAfford(goal, { ...opponent.hand, [resource]: 0 }, rate, opponent.bankRatio);
+          delay += Number.isFinite(before) ? Math.min(planning.horizon.turns + 1, Math.max(0, after - before)) : 0;
+          const expected = Object.fromEntries(RESOURCES.map((r) => [r, opponent.hand[r] + rate[r]]));
+          const spends = affordableWithTrades(expected, opponent.bankRatio, goal);
+          futureHaul += Math.max(0, expected[resource] - (spends ? goal[resource] ?? 0 : 0));
         }
-        const totalProd = RESOURCES.reduce((s, r) => s + prodByRes[r], 0);
-        const estHeld = (r) => totalProd > 0 ? prodByRes[r] / totalProd * oppCards : oppCards / RESOURCES.length;
-        const shortForBuild = (r) => fit.strategy.buildOrder.some((item) => (BUILD_COSTS[item][r] ?? 0) > you.hand[r]);
-        const weHaveLots = RESOURCES.filter((r) => you.hand[r] >= 4);
-        let bestRes = null;
-        let bestScore = 0;
-        for (const r of RESOURCES) {
-          let score = estHeld(r) + (shortForBuild(r) ? 0.75 : 0);
-          if (weHaveLots.includes(r) && oppDevInference2.likelyMonopoly) score += 2;
-          if (score > bestScore) {
-            bestScore = score;
-            bestRes = r;
-          }
-        }
-        const haulFloor = winProb.probability < 0.4 ? 1.5 : 2;
-        if (bestRes && estHeld(bestRes) >= haulFloor) {
-          return {
-            kind: "play-monopoly",
-            resource: bestRes,
-            describe: `play monopoly on ${bestRes} (~${estHeld(bestRes).toFixed(0)} cards from opponents)${weHaveLots.includes(bestRes) && oppDevInference2.likelyMonopoly ? " [counter their monopoly]" : ""}`
-          };
-        }
+        const value = scoreHand(next) - base + delay / (1 + planning.horizon.turns);
+        const survival = planning.horizon.turns / (1 + planning.horizon.turns);
+        const later = scoreHand({ ...futureHand, [resource]: futureHand[resource] + futureHaul }, laterHorizon) - futureBase;
+        waitingValue = Math.max(waitingValue, survival * Math.max(0, later));
+        if (haul > 0 && (!best || value > best.value)) best = { resource, value, haul };
+      }
+      if (best && best.value > 0 && best.value + 1e-6 >= waitingValue) return finish({
+        kind: "play-monopoly",
+        resource: best.resource,
+        describe: `play monopoly on ${best.resource} — ${best.haul} confirmed cards, more useful now than waiting`
+      });
+    }
+    if (top && opts.hasYearOfPlenty && allowed("play-year-of-plenty")) {
+      let best = null;
+      for (const a of RESOURCES) for (const b of RESOURCES) {
+        const hand = { ...you.hand };
+        hand[a]++;
+        hand[b]++;
+        const after = evaluateBuilds([top], hand, planning.production, you.bankRatio, planning.remaining, planning.gap, planning.horizon)[0];
+        if (after.wait < top.wait && (!best || after.score - top.score > best.improvement)) best = { resources: [a, b], improvement: after.score - top.score };
+      }
+      if (best && best.improvement > 0) return finish({
+        kind: "play-year-of-plenty",
+        resources: best.resources,
+        describe: `year of plenty — ${best.resources.join(" + ")} accelerates ${top.kind}`
+      });
+    }
+    if (opts.hasRoadBuilding && allowed("play-road-building") && hasPiece("road")) {
+      const free = freeRoadChoices(Math.min(2, (pieces == null ? void 0 : pieces.roads) ?? 2))[0];
+      if (free && free.score > ((top == null ? void 0 : top.score) ?? 0) && free.wait < planning.horizon.turns) {
+        return finish({ kind: "play-road-building", describe: `free roads accelerate the planned ${free.kind}` });
       }
     }
-    const rawSpot = gs && gs.youPlayer !== null ? bestPlaceableNow(gs.state, gs.youPlayer) : null;
-    const spotOnNetwork = (() => {
-      if (rawSpot === null || !board) return rawSpot;
-      const v = board.vertices[rawSpot];
-      const pipsHere = vertexPips(board, rawSpot);
-      const endgame = visibleVp(you) + (opts.vpCardsHeld ?? 0) >= (opts.winTarget ?? 10) - 2;
-      if (pipsHere >= 3 || endgame || v.port && v.port.ratio === 2) return rawSpot;
-      return null;
-    })();
-    const ownSettlements = gs && gs.youPlayer !== null ? gs.state.buildings.filter((b) => b.player === gs.youPlayer && b.kind === "settlement").length : 0;
-    const claim = (() => {
-      if (spotOnNetwork !== null) return null;
-      if (!advice || advice.roadEdges.length === 0 || !board || !gs || gs.youPlayer === null) return null;
-      if (!hasPiece("settlement")) return null;
-      const roads = advice.roadEdges.length;
-      const last = board.edges[advice.roadEdges[roads - 1]];
-      if (!isVertexBuildable(gs.state, last.a) && !isVertexBuildable(gs.state, last.b)) return null;
-      return { roads, cost: { wood: 1 + roads, brick: 1 + roads, sheep: 1, wheat: 1 } };
-    })();
-    const canClaimNow = !!claim && RESOURCES.every((r) => you.hand[r] >= (claim.cost[r] ?? 0));
-    const buildDecision = (item) => {
-      var _a;
-      if (item === "dev") {
-        if (!devAvailable) return null;
-        return { kind: "buy-dev", describe: "buy a development card" };
+    if (top) {
+      const action = build(top);
+      if (action) return finish(action);
+      if (((_e = top.roadEdges) == null ? void 0 : _e.length) && top.wait < planning.horizon.turns && afford("road") && allowed("build-road") && hasPiece("road") && gs && board) {
+        const edge = board.edges[top.roadEdges[0]];
+        const coord = pixelsToColonistEdge(board.vertices[edge.a], board.vertices[edge.b]);
+        if (coord) return finish({
+          kind: "build-road",
+          coord,
+          describe: `road toward planned ${top.kind}, completable within the remaining game`
+        });
       }
-      if (!hasPiece(item)) return null;
-      if (!gs || gs.youPlayer === null || !board) return null;
-      if (item === "city") {
-        const settlements = gs.state.buildings.filter(
-          (b) => b.player === gs.youPlayer && b.kind === "settlement"
-        );
-        if (settlements.length === 0) return null;
-        const target = settlements.reduce(
-          (a, b) => vertexPips(board, a.vertexId) >= vertexPips(board, b.vertexId) ? a : b
-        );
-        const v = board.vertices[target.vertexId];
-        const coord = pixelToColonistCorner(v.x, v.y);
-        if (coord) return { kind: "build-city", coord, describe: "upgrade best settlement to a city" };
-      } else if (item === "settlement") {
-        const spot = bestPlaceableNow(gs.state, gs.youPlayer);
-        if (spot === null) return null;
-        const v = board.vertices[spot];
-        const coord = pixelToColonistCorner(v.x, v.y);
-        if (coord) return { kind: "build-settlement", coord, describe: "settlement on your network" };
-      } else if (item === "road") {
-        if (!advice || advice.roadEdges.length === 0) return null;
-        const e = board.edges[advice.roadEdges[0]];
-        if (gs.state.roads.some((r) => r.edgeId === e.id)) return null;
-        const coord = pixelsToColonistEdge(board.vertices[e.a], board.vertices[e.b]);
-        if (!coord) return null;
-        if (claim && canClaimNow) {
-          return {
-            kind: "build-road",
-            coord,
-            describe: `road toward spot ① (${claim.roads} road${claim.roads > 1 ? "s" : ""}, settling it this turn)`
-          };
-        }
-        const nearLimit = handSize >= limit - 2;
-        const surplus = you.hand.wood >= 3 && you.hand.brick >= 3;
-        const len = advice.roadPathLength ?? advice.roadEdges.length;
-        const myRoads = gs.state.roads.filter((r) => r.player === gs.youPlayer).length;
-        const myBuildings = gs.state.buildings.filter((b) => b.player === gs.youPlayer).length;
-        const bloated = myRoads >= myBuildings + 3;
-        if (bloated && opts.endgameStep !== "road") return null;
-        if (opts.endgameStep === "road" && afford("road")) {
-          return { kind: "build-road", coord, describe: "road toward Longest Road (cheapest +2)" };
-        }
-        const claimStuck = !!claim && !affordableWithTrades(you.hand, you.bankRatio, claim.cost);
-        const hasOpponent = gs.state.buildings.some((b) => b.player !== gs.youPlayer);
-        let raceLost = false;
-        let winningRace = false;
-        if (gs.youPlayer !== null && len > 0 && hasOpponent) {
-          const c = spotContest(gs.state, gs.youPlayer, ((_a = advice.spots[0]) == null ? void 0 : _a.vertexId) ?? -1);
-          if (c.oppLen === null) {
-            winningRace = true;
-          } else {
-            winningRace = c.ourLen + 1 <= c.oppLen;
-            if (!winningRace) {
-              const finishNow = !!claim && affordableWithTrades(you.hand, you.bankRatio, claim.cost);
-              raceLost = !finishNow;
-            }
-          }
-        }
-        const worthExtending = ((claim ? nearLimit && claimStuck : surplus || nearLimit) || winningRace && surplus) && !raceLost;
-        if (hasPiece("settlement") && worthExtending) {
-          return {
-            kind: "build-road",
-            coord,
-            describe: `development road toward spot ① (${len} road${len > 1 ? "s" : ""} away)`
-          };
-        }
-        if (raceLost && hasPiece("settlement") && (surplus || nearLimit)) {
-          return null;
-        }
-      }
-      return null;
-    };
-    const canExpandMore = ((pieces == null ? void 0 : pieces.settlements) ?? 1) !== 0 || ((pieces == null ? void 0 : pieces.cities) ?? 1) !== 0;
-    const winTarget = opts.winTarget ?? 10;
-    const myVp = visibleVp(you) + (opts.vpCardsHeld ?? 0);
-    const growthPhase = canExpandMore && myVp < winTarget - 2 && riskMode !== "lotto";
-    const lateOrder = (bo) => {
-      const devAt = bo.indexOf("dev");
-      if (devAt === -1 || bo.indexOf("settlement") < devAt) return bo;
-      const rest = bo.filter((x) => x !== "settlement");
-      rest.splice(rest.indexOf("dev"), 0, "settlement");
-      return rest;
-    };
-    const lateWithRoads = (bo) => {
-      let out = bo.includes("road") ? [...bo] : [...bo, "road"];
-      if (!out.includes("dev")) out = [...out, "dev"];
-      return out;
-    };
-    const bestUpgradePips = gs && gs.youPlayer !== null && board ? gs.state.buildings.filter((b) => b.player === gs.youPlayer && b.kind === "settlement").reduce((mx, b) => Math.max(mx, vertexPips(board, b.vertexId)), -1) : -1;
-    const bestSpotPips = spotOnNetwork !== null && board ? vertexPips(board, spotOnNetwork) : -1;
-    const cityFirst = bestUpgradePips >= 0 && bestSpotPips < bestUpgradePips + 2;
-    const growthOrder = cityFirst ? ["city", "settlement", "road"] : ["settlement", "city", "road"];
-    const steer = (bo) => opts.endgameStep ? [opts.endgameStep, ...bo.filter((x) => x !== opts.endgameStep)] : bo;
-    const order = growthPhase ? growthOrder : steer(lateWithRoads(lateOrder(fit.strategy.buildOrder)));
-    const fundingTarget = (item) => {
-      if (!canBuild(item)) return null;
-      if (!gs || gs.youPlayer === null || !board) return null;
-      if (item === "road" && (!advice || advice.roadEdges.length === 0)) return null;
-      if (item === "settlement" && spotOnNetwork === null) {
-        return claim ? claim.cost : null;
-      }
-      if (item === "city" && ownSettlements === 0) return null;
-      return BUILD_COSTS[item];
-    };
-    if (opts.hasRoadBuilding && allowed("play-road-building") && hasPiece("road") && advice && advice.roadEdges.length > 0) {
-      const why = claim ? `free road${claim.roads > 1 ? "s" : ""} to claim spot ①` : `free roads toward spot ① (${advice.roadPathLength ?? advice.roadEdges.length} away)`;
-      return { kind: "play-road-building", describe: `play road building — ${why}` };
-    }
-    if (opts.hasYearOfPlenty && allowed("play-year-of-plenty")) {
-      for (const item of order) {
-        if (item === "road") continue;
-        const cost = fundingTarget(item);
-        if (!cost) continue;
-        const missing = [];
-        for (const r of RESOURCES) {
-          for (let i = you.hand[r]; i < (cost[r] ?? 0); i++) missing.push(r);
-        }
-        if (missing.length === 0) continue;
-        const endgame = myVp >= winTarget - 3;
-        if (missing.length > 2 && !endgame) continue;
-        if (missing.length > 2) missing.length = 2;
-        while (missing.length < 2) {
-          missing.push([...RESOURCES].sort((a, b) => fit.strategy.weights[b] - fit.strategy.weights[a])[0]);
-        }
-        return {
-          kind: "play-year-of-plenty",
-          resources: [missing[0], missing[1]],
-          describe: `play year of plenty — take ${missing.join(" + ")} to complete a ${item}`
-        };
-      }
-    }
-    for (const item of order) {
-      if (!afford(item)) continue;
-      const d = buildDecision(item);
-      if (d) return d;
-    }
-    const robberOnMine = !!robberHex && !!gs && gs.youPlayer !== null && !!board && gs.state.buildings.some(
-      (b) => b.player === gs.youPlayer && board.vertices[b.vertexId].hexIds.some((h) => board.hexes[h].q === robberHex.x && board.hexes[h].r === robberHex.y)
-    );
-    const devBuyOk = growthPhase && allowed("buy-dev") && devAvailable && afford("dev") && !!gs && gs.youPlayer !== null && you.devCards < 2;
-    if (devBuyOk) {
-      const targets = ["settlement", "city"].map(fundingTarget).filter((c) => !!c);
-      const reachable = targets.some((c) => affordableWithTrades(you.hand, you.bankRatio, c));
-      if (robberOnMine && !opts.knightAvailable) {
-        return { kind: "buy-dev", describe: "buy a development card (robber on our tile, no knight in hand)" };
-      }
-      if (!reachable && riskMode !== "protect") {
-        return { kind: "buy-dev", describe: "buy a development card (nothing else reachable)" };
-      }
-    }
-    if (handSize >= limit) {
-      const buildReachable = !!gs && gs.youPlayer !== null && // without the board, placeability is unknown — dump into a dev
-      ["settlement", "city"].map(fundingTarget).some((c) => !!c && affordableWithTrades(you.hand, you.bankRatio, c));
-      for (const item of ["city", "settlement", "dev", "road"]) {
-        if (item === "dev" && buildReachable) continue;
-        if (!afford(item)) continue;
-        const d = buildDecision(item);
-        if (d) {
-          return { ...d, describe: `${d.describe} (dumping cards — at the ${limit}-card limit)` };
-        }
-      }
-    }
-    if (opts.canProposeTrade && allowed("propose-trade")) {
-      const plan = order.filter((i) => i !== "road").map(fundingTarget).filter((c) => !!c);
-      const prop = proposeTrade(you.hand, plan, fit.strategy.weights, { alreadyAsked: opts.askedThisTurn ?? [], handLimit: limit });
-      if (prop) {
-        return { kind: "propose-trade", offer: { offered: prop.offered, wanted: prop.wanted }, describe: `propose trade — ${prop.reason}` };
-      }
-    }
-    for (const item of allowed("bank-trade") ? order : []) {
-      if (item === "road") continue;
-      const cost = fundingTarget(item);
-      if (!cost) continue;
-      const short = RESOURCES.some((r) => (cost[r] ?? 0) > you.hand[r]);
-      if (!short) continue;
-      if (!affordableWithTrades(you.hand, you.bankRatio, cost)) continue;
-      const trade = tradeTowardCost(you.hand, you.bankRatio, cost, fit.strategy.weights);
-      if (trade) {
-        return {
-          kind: "bank-trade",
-          trade,
-          describe: `bank-trade ${trade.giveCount} ${trade.give} for ${trade.get} toward a ${item}`
-        };
-      }
-    }
-    const endgameNow = myVp >= winTarget - 2;
-    if ((endgameNow || handSize >= limit - 1) && allowed("bank-trade") && gs && gs.youPlayer !== null) {
-      for (const item of order) {
-        if (item === "road") continue;
-        const cost = fundingTarget(item);
-        if (!cost) continue;
-        const trade = tradeTowardCost(you.hand, you.bankRatio, cost, fit.strategy.weights);
+      if (allowed("bank-trade")) {
+        const trade = tradeTowardCost(you.hand, you.bankRatio, top.cost, planning.weights);
         if (trade) {
-          return {
+          const hand = { ...you.hand };
+          hand[trade.give] -= trade.giveCount;
+          hand[trade.get]++;
+          const after = turnsToAfford(top.cost, hand, planning.production, you.bankRatio);
+          if (after + 1e-6 < top.wait || handSize > limit && RESOURCES.reduce((s, r) => s + hand[r], 0) < handSize) return finish({
             kind: "bank-trade",
             trade,
-            describe: `bank-trade ${trade.giveCount} ${trade.give} for ${trade.get} toward a ${item} (near the ${limit}-card limit)`
-          };
+            describe: `bank-trade ${trade.giveCount} ${trade.give} for ${trade.get} to reach ${top.kind} sooner`
+          });
         }
       }
     }
-    const sevenDue = p7next >= base7 * 1.25;
-    const dumpDist = riskMode === "protect" ? 3 : sevenDue ? 3 : 2;
-    if (handSize >= limit - dumpDist && allowed("bank-trade")) {
-      const trade = tradeSurplusToAvoidDiscard(
-        you.hand,
-        you.bankRatio,
-        fit.strategy.weights,
-        limit,
-        order,
-        fundingTarget,
-        dumpDist
-      );
-      if (trade) {
-        return {
-          kind: "bank-trade",
-          trade,
-          describe: `bank-trade ${trade.giveCount} ${trade.give} for ${trade.get} (avoiding 7 discard — ${handSize}/${limit} cards)`
-        };
-      }
+    if (opts.canProposeTrade && top && allowed("propose-trade")) {
+      const offer = proposeTrade(you.hand, [top.cost], planning.weights, { alreadyAsked: opts.askedThisTurn, handLimit: limit });
+      if (offer) return finish({ kind: "propose-trade", offer, describe: "offer a trade toward the planned build" });
     }
-    if (oppDevInference.likelyMonopoly && oppDevInference.confidence >= 0.5 && handSize < limit - dumpDist && allowed("bank-trade")) {
-      const fat = [...RESOURCES].sort((a, b) => you.hand[b] - you.hand[a])[0];
-      if (you.hand[fat] >= 4) {
-        const ratio = you.bankRatio[fat] ?? 4;
-        let need = null;
-        let needScore = -Infinity;
-        for (const r of RESOURCES) {
-          const s = fit.strategy.weights[r] - you.hand[r] * 0.3;
-          if (s > needScore) {
-            needScore = s;
-            need = r;
-          }
-        }
-        if (need && need !== fat) {
-          return {
-            kind: "bank-trade",
-            trade: { give: fat, get: need, giveCount: ratio },
-            describe: `bank-trade ${ratio} ${fat} for ${need} (denying their likely monopoly)`
-          };
-        }
-      }
-    }
-    if (devBuyOk && handSize >= limit - 2) {
-      return { kind: "buy-dev", describe: "buy a development card (hand near the limit, no trade toward a build)" };
-    }
-    if (handSize >= limit && growthPhase && allowed("bank-trade") && devAvailable && !afford("dev") && gs && gs.youPlayer !== null && you.devCards < 2 && affordableWithTrades(you.hand, you.bankRatio, BUILD_COSTS.dev)) {
-      const trade = tradeTowardCost(you.hand, you.bankRatio, BUILD_COSTS.dev, fit.strategy.weights);
-      if (trade) {
-        return { kind: "bank-trade", trade, describe: `bank-trade ${trade.giveCount} ${trade.give} for ${trade.get} toward a dev card (nothing else reachable)` };
-      }
-    }
-    if (handSize >= limit && allowed("bank-trade")) {
-      const trade = planBankTrade(you.hand, you.bankRatio, fit, canBuild);
-      if (trade) {
-        return {
-          kind: "bank-trade",
-          trade,
-          describe: `bank-trade ${trade.giveCount} ${trade.give} for ${trade.get} (at the ${limit}-card limit)`
-        };
-      }
-    }
-    return allowed("end-turn") ? { kind: "end-turn", describe: "end the turn" } : null;
+    return allowed("end-turn") ? finish({ kind: "end-turn", describe: top ? `save for ${top.kind} (~${top.wait.toFixed(1)} turns)` : "end turn — no verified build target" }) : null;
   }
   class Autopilot {
     constructor(learner2, dispatch = () => false, domAct = (kind, exclude) => tryDomAction(kind, document, exclude), domDiscard = tryDomDiscard) {
@@ -2960,15 +3328,15 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
       return { enabled: this.enabled, status: this.learner.status(), note: this.note };
     }
     tick(ctx) {
-      var _a, _b, _c, _d, _e;
+      var _a, _b, _c, _d, _e, _f;
       const vpCardsHeld = (ctx.myDevCardIds ?? []).filter((id) => id === 12).length;
       if (!this.enabled) return;
       const now = ctx.now ?? Date.now();
       const you0 = ((_a = ctx.tracker) == null ? void 0 : _a.youName) ? ctx.tracker.players.get(ctx.tracker.youName) : void 0;
       for (const offer of ctx.tradeOffers ?? []) {
         if (this.answeredOffers.has(offer.id) || !you0) continue;
-        const plan = planCosts(ctx.fit, visibleVp(you0), ctx.winTarget ?? 10);
-        const verdict = decideTradeResponse(you0.hand, offer, plan, ((_b = ctx.tracker) == null ? void 0 : _b.discardLimit) ?? 7);
+        const plan = ((_b = ctx.planning) == null ? void 0 : _b.builds.map((b) => b.cost)) ?? planCosts(ctx.fit, visibleVp(you0), ctx.winTarget ?? 10);
+        const verdict = decideTradeResponse(you0.hand, offer, plan, ((_c = ctx.tracker) == null ? void 0 : _c.discardLimit) ?? 7);
         const decision2 = {
           kind: "trade-response",
           tradeId: offer.id,
@@ -3002,8 +3370,8 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
         return;
       }
       const robberMine = this.robberPending && (this.myTurn || !this.wsTurnSeen);
-      const you = ((_c = ctx.tracker) == null ? void 0 : _c.youName) ? ctx.tracker.players.get(ctx.tracker.youName) : void 0;
-      const mustDiscard = this.discardPending && !!you && handTotal(you) > (((_d = ctx.tracker) == null ? void 0 : _d.discardLimit) ?? 9);
+      const you = ((_d = ctx.tracker) == null ? void 0 : _d.youName) ? ctx.tracker.players.get(ctx.tracker.youName) : void 0;
+      const mustDiscard = this.discardPending && !!you && handTotal(you) > (((_e = ctx.tracker) == null ? void 0 : _e.discardLimit) ?? 9);
       if (!robberMine && !mustDiscard && (!this.myTurn || !ctx.tracker || !ctx.tracker.youName)) {
         const sig = this.domMine ? "banner" : this.wsMine ? "ws" : "none";
         this.note = `on — waiting for your turn (signal: ${sig})`;
@@ -3034,7 +3402,7 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
         freeRoadsPending: this.freeRoads,
         canRob: ctx.canRob,
         winTarget: ctx.winTarget,
-        endgameStep: ctx.endgameStep,
+        planning: ctx.planning,
         vpCardsHeld,
         canProposeTrade: (ctx.playerCount ?? 2) >= 3 && this.askedThisTurn.length < 2,
         askedThisTurn: this.askedThisTurn
@@ -3046,7 +3414,7 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
         this.note = robberMine ? "on — move the robber manually (board not captured or no good tile)" : "on — nothing to do";
         return;
       }
-      if (decision.kind === "build-settlement" && (((_e = ctx.gs) == null ? void 0 : _e.state.buildings.length) ?? 1) === 0) {
+      if (decision.kind === "build-settlement" && (((_f = ctx.gs) == null ? void 0 : _f.state.buildings.length) ?? 1) === 0) {
         if (this.firstSettHold === null) {
           this.firstSettHold = now + FIRST_SETTLEMENT_THINK_MS;
           this.note = "thinking about the best opening spot…";
@@ -3057,6 +3425,10 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
           return;
         }
         this.firstSettHold = null;
+      }
+      if (decision.kind === "play-monopoly" && (!decision.resource || confirmedMonopolyHaul(ctx.tracker.players.values(), ctx.tracker.youName, decision.resource) <= 0)) {
+        this.note = "holding Monopoly — resource holdings are not confirmed";
+        return;
       }
       if (this.dispatch(decision)) {
         this.pending = { kind: decision.kind, t: now, via: "ws" };
@@ -3174,7 +3546,7 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
       byPlayers
     };
   }
-  const VERSION = "v1.18 hidden-vp";
+  const VERSION = "v1.19 exact-hands-horizon";
   const CSS = `
 #catan-copilot {
   --surface: #fcfcfb; --ink: #0b0b0b; --ink-2: #52514e; --ink-3: #898781;
@@ -3551,7 +3923,7 @@ html.cc-docked-page {
       doc.addEventListener("mouseup", () => dragging = false);
     }
     render(state, bridge2) {
-      var _a, _b;
+      var _a, _b, _c, _d;
       const active = this.root.ownerDocument.activeElement;
       if (active && this.root.contains(active) && /^(SELECT|INPUT|TEXTAREA|OPTION)$/.test(active.tagName)) {
         if (this.deferredRender === void 0) {
@@ -3571,8 +3943,10 @@ html.cc-docked-page {
       let advice = null;
       if (bridge2 == null ? void 0 : bridge2.board) {
         gs = bridge2.toGameState();
-        if (gs) advice = advisePlacement(gs.state, gs.youPlayer);
+        if (gs) advice = advisePlacement(gs.state, gs.youPlayer, state.players.size);
       }
+      const planning = ((_b = (_a = this.hooks).getPlanning) == null ? void 0 : _b.call(_a)) ?? null;
+      if (planning && gs && advice) advice = planningAdvice(advice, planning, gs.state);
       const you = state.youName;
       const fits = you && state.players.has(you) ? rankLiveStrategies(state, you, strategyPriors(loadRecords())) : [];
       const evalHtml = this.renderEval(state, bridge2 ?? null);
@@ -3584,7 +3958,11 @@ html.cc-docked-page {
         }
         const inSetup = (advice == null ? void 0 : advice.phase) === "setup" || state.rolls.length === 0;
         if (!inSetup) {
-          parts.push(this.renderYourMove(nextMoves(state, you, fits[0], facts)));
+          const top = planning == null ? void 0 : planning.builds[0];
+          parts.push(this.renderYourMove(top ? [{
+            primary: true,
+            text: `${top.wait === 0 ? "Fund" : "Save for"} ${top.kind}${top.vertexId !== void 0 ? ` at intersection ${top.vertexId}` : ""} — ~${top.wait.toFixed(1)} turns to fund; race horizon ~${planning.horizon.turns.toFixed(1)} turns.`
+          }] : nextMoves(state, you, fits[0], facts)));
         }
       }
       parts.push(this.renderWhereToBuild(bridge2 ?? null, gs, advice));
@@ -3592,12 +3970,24 @@ html.cc-docked-page {
       parts.push(this.renderPlayers(state));
       parts.push(this.renderWinChances());
       if (you && fits.length > 0) {
-        parts.push(this.renderStrategies(fits));
-        const robber = robberAdvice(state);
+        if (planning) {
+          const mine = planning.victories.find((p) => p.isYou);
+          parts.push(`<h4>Plan to finish</h4><p class="cc-note">${esc((mine == null ? void 0 : mine.summary) ?? "Building production while a route opens")}</p>`);
+        } else parts.push(this.renderStrategies(fits));
+        const tile = planning && gs && gs.youPlayer !== null ? bestRobberHex(
+          gs.state,
+          gs.youPlayer,
+          (bridge2 == null ? void 0 : bridge2.robberHex) ?? null,
+          void 0,
+          void 0,
+          void 0,
+          planning
+        ) : null;
+        const robber = tile ? { reason: tile.describe } : robberAdvice(state);
         if (robber) {
           parts.push(`<h4>Robber</h4><p class="cc-note">${esc(robber.reason)}</p>`);
         }
-        const tips = tradeTips(state, you, fits[0]);
+        const tips = planning ? [] : tradeTips(state, you, fits[0]);
         if (tips.length) parts.push(this.renderTrades(tips, isOneVsOne(state)));
       } else {
         parts.push(
@@ -3607,7 +3997,7 @@ html.cc-docked-page {
       if (state.gameOver) {
         parts.unshift(`<p class="cc-note"><strong>${esc(state.gameOver)}</strong> won the game.</p>`);
       }
-      if ((_b = (_a = this.hooks).needsRefresh) == null ? void 0 : _b.call(_a)) {
+      if ((_d = (_c = this.hooks).needsRefresh) == null ? void 0 : _d.call(_c)) {
         parts.unshift(
           `<p class="cc-note" style="color:var(--brick);font-weight:600">⟳ Reload this tab! The game socket isn't captured — exact hands, the board map and full autopilot need it. (Colonist resends everything on refresh.)</p>`
         );
@@ -3718,10 +4108,13 @@ html.cc-docked-page {
      * dev cards, and the top drivers as one-liners.
      */
     renderEval(state, bridge2) {
+      var _a, _b;
       if (!state.youName || state.gameOver || state.rolls.length === 0) return "";
       const you = state.players.get(state.youName);
       const opponents = [...state.players.values()].filter((p) => p.name !== state.youName);
       if (!you || opponents.length === 0) return "";
+      const planning = (_b = (_a = this.hooks).getPlanning) == null ? void 0 : _b.call(_a);
+      if (planning) return `<h4>Remaining game (estimate)</h4><p class="cc-note">~${planning.horizon.turns.toFixed(1)} own turns before the first projected finish. Production investments are valued over that horizon.</p>`;
       const opp = opponents.reduce((a, b) => visibleVp(b) > visibleVp(a) ? b : a, opponents[0]);
       let gs = null;
       try {
@@ -3741,19 +4134,8 @@ html.cc-docked-page {
       const pct = Math.round(Math.min(0.95, Math.max(0.05, wp.probability)) * 100);
       const sign = wp.probability >= 0.5 ? "+" : "−";
       const ev = (Math.abs(wp.probability - 0.5) * 2).toFixed(1);
-      const mode = riskModeOf(wp.probability);
-      const verdict = mode === "protect" ? "You're ahead — protecting the lead" : mode === "lotto" ? "You're behind — playing for variance" : "Even game";
+      const verdict = "Race estimate unavailable — showing observed position only";
       const drivers = [...wp.reasoning];
-      if (mode === "lotto") drivers.push("Behind: dev cards stay in the plan — each is a comeback ticket.");
-      if (mode === "protect") drivers.push("Ahead: hands dump 3 cards before the limit so a 7 can't bite.");
-      const starve = (() => {
-        if (!gs || gs.youPlayer === null || !opp) return null;
-        const oppId = opp.playerId ?? colonistIdForColor(opp.color);
-        if (oppId === null) return null;
-        const r = opponentStarveResource(gs.state, oppId);
-        return r ? `They're thinnest on ${r} — robber on ${r} tiles hurts them most.` : null;
-      })();
-      if (starve) drivers.push(starve);
       const driverHtml = drivers.slice(0, 4).map((r) => `<li>${esc(r)}</li>`).join("");
       return `
       <h4>Eval ${sign}${ev} — ${verdict}</h4>
@@ -3839,11 +4221,12 @@ html.cc-docked-page {
       <table class="cc-wtable">${rows}</table>`;
     }
     renderPlayers(state) {
+      var _a, _b, _c, _d;
       if (state.players.size === 0) return "";
       const rows = [...state.players.values()].sort((a, b) => visibleVp(b) - visibleVp(a)).map((p) => {
         const prodPips = Math.round(productionTotal(expectedProduction(p)) * 36);
-        const total = p.serverCards ?? handTotal(p);
-        const cards = p.serverCards === null ? `${total}${p.uncertainty ? `±${p.uncertainty}` : ""}` : `${total}${p.uncertainty ? ` <span class="cc-muted">(${p.uncertainty}?)</span>` : ""}`;
+        const total2 = p.serverCards ?? handTotal(p);
+        const cards = p.serverCards === null ? `${total2}${p.uncertainty ? `±${p.uncertainty}` : ""}` : `${total2}${p.uncertainty ? ` <span class="cc-muted">(${p.uncertainty}?)</span>` : ""}`;
         const hand = HAND_ORDER.map(
           (r) => `<span class="cc-slot${p.hand[r] === 0 ? " zero" : ""}" title="${r}: ${p.hand[r]}" aria-label="${r} ${p.hand[r]}">${RESOURCE_ICON[r]}<span>${p.hand[r]}</span></span>`
         ).join("");
@@ -3851,13 +4234,14 @@ html.cc-docked-page {
           <tr>
             <td><span class="dot" style="background:${esc(p.color)}"></span>${esc(p.name)}${state.youName === p.name ? " <span class='cc-muted'>(you)</span>" : ""}</td>
             <td>${visibleVp(p)}</td>
-            <td title="known hand">${cards}</td>
+            <td title="${esc(p.trackingReason ?? p.trackingHealth ?? "unverified hand")}">${cards}${p.name !== state.youName ? ` <small>${esc(p.trackingHealth ?? "unverified")}</small>` : ""}</td>
             <td>${prodPips}</td>
             <td>${p.devCards}/${p.knightsPlayed}</td>
           </tr>
           <tr><td colspan="5" style="text-align:left;padding-left:18px"><div class="cc-hand">${hand}</div></td></tr>`;
       });
-      const mode = isOneVsOne(state) ? ` <span class="cc-muted">(1v1 — first to 15 VP)</span>` : "";
+      const target = (_d = (_c = (_b = (_a = this.hooks).getPlanning) == null ? void 0 : _b.call(_a)) == null ? void 0 : _c.victories[0]) == null ? void 0 : _d.target;
+      const mode = isOneVsOne(state) ? ` <span class="cc-muted">(1v1${target ? ` — first to ${target} VP` : ""})</span>` : "";
       return `
       <h4>Players${mode}</h4>
       <table>
@@ -4021,7 +4405,7 @@ html.cc-docked-page {
      *   0 = settlements (count, 1 VP each)   1 = cities (count, 2 VP each —
      *       a settlement leaves key 0 when it's upgraded: {"0":1,"1":1} = 3 VP)
      *   2 = Longest Road (flag → 2)          3 = Largest Army (flag → 2)
-     *   4 = victory-point dev cards (points)
+     *   4 = victory-point dev cards (excluded from PUBLIC points)
      * Verified against a real 15-9 game that the old "+1 per city" weighting
      * reported as 11-6 (4 and 2 cities under-counted by one each).
      */
@@ -4029,14 +4413,14 @@ html.cc-docked-page {
       var _a, _b;
       const vp = (_b = (_a = this.state.playerStates) == null ? void 0 : _a[String(color)]) == null ? void 0 : _b.victoryPointsState;
       if (!vp) return 0;
-      let total = 0;
+      let total2 = 0;
       for (const [k, n] of Object.entries(vp)) {
         const v = n ?? 0;
-        if (k === "1") total += v * 2;
-        else if (k === "2" || k === "3") total += v > 0 ? 2 : 0;
-        else total += v;
+        if (k === "1") total2 += v * 2;
+        else if (k === "2" || k === "3") total2 += v > 0 ? 2 : 0;
+        else if (k !== "4") total2 += v;
       }
-      return total;
+      return total2;
     }
     /** our own dev-card type ids (playable ones we hold), e.g. 13 = monopoly */
     myDevCardIds() {
@@ -4465,172 +4849,6 @@ html.cc-docked-page {
       }
     }
   }
-  const BUILD = {
-    city: { ore: 3, wheat: 2 },
-    settlement: { wood: 1, brick: 1, sheep: 1, wheat: 1 },
-    road: { wood: 1, brick: 1 },
-    dev: { ore: 1, sheep: 1, wheat: 1 }
-  };
-  const VP_CARD_RATE = 5 / 25;
-  const BONUS_VP = 2;
-  const TAU = 2;
-  function costCards(c) {
-    return RESOURCES.reduce((s, r) => s + (c[r] ?? 0), 0);
-  }
-  function addCost(a, b) {
-    const out = { ...a };
-    for (const r of RESOURCES) if (b[r]) out[r] = (out[r] ?? 0) + (b[r] ?? 0);
-    return out;
-  }
-  function scaleCost(c, k) {
-    const out = {};
-    for (const r of RESOURCES) if (c[r]) out[r] = (c[r] ?? 0) * k;
-    return out;
-  }
-  function buysFor(p, ctx, holdsLA, holdsLR, laReach, lrReach, knightsToLA, roadsToLR) {
-    const buys = [];
-    const cityN = Math.min(p.citiesLeft ?? Infinity, p.settlementsOnBoard);
-    for (let i = 0; i < cityN; i++) {
-      buys.push({ kind: "city", vp: 1, cost: BUILD.city, note: "upgrade a settlement to a city" });
-    }
-    const settN = p.settlementsLeft ?? 0;
-    const freeSpots = p.settlementSpotOpen ? 1 : 0;
-    for (let i = 0; i < settN; i++) {
-      const needsRoad = i >= freeSpots;
-      buys.push({
-        kind: "settlement",
-        vp: 1,
-        cost: needsRoad ? addCost(BUILD.settlement, BUILD.road) : BUILD.settlement,
-        note: needsRoad ? "road + settlement to a new spot" : "settlement on an open spot"
-      });
-    }
-    if (!holdsLA && laReach) {
-      buys.push({
-        kind: "largest-army",
-        vp: BONUS_VP,
-        cost: scaleCost(BUILD.dev, knightsToLA),
-        note: `${knightsToLA} more knight${knightsToLA > 1 ? "s" : ""} for Largest Army`
-      });
-    }
-    if (!holdsLR && lrReach) {
-      buys.push({
-        kind: "longest-road",
-        vp: BONUS_VP,
-        cost: scaleCost(BUILD.road, roadsToLR),
-        note: `${roadsToLR} more road${roadsToLR > 1 ? "s" : ""} for Longest Road`
-      });
-    }
-    const perVp = Math.round(1 / VP_CARD_RATE);
-    const vpDevCap = ctx.devDeckLeft === null ? 6 : Math.floor(ctx.devDeckLeft * VP_CARD_RATE + 1e-3);
-    for (let i = 0; i < vpDevCap; i++) {
-      buys.push({ kind: "vp-dev", vp: 1, cost: scaleCost(BUILD.dev, perVp), note: "victory-point dev card (expected)" });
-    }
-    return buys;
-  }
-  function cheapestPlan(buys, gap) {
-    if (gap <= 0) return [];
-    const INF = Infinity;
-    const dp = Array.from({ length: gap + 1 }, (_, i) => ({
-      cost: i === 0 ? 0 : INF,
-      items: []
-    }));
-    for (const b of buys) {
-      const bc = costCards(b.cost);
-      for (let v = gap; v >= 0; v--) {
-        if (dp[v].cost === INF) continue;
-        const nv = Math.min(gap, v + b.vp);
-        if (dp[v].cost + bc < dp[nv].cost) {
-          dp[nv] = { cost: dp[v].cost + bc, items: [...dp[v].items, b] };
-        }
-      }
-    }
-    return dp[gap].items;
-  }
-  function summarise(p, plan, eliminated, laReach, lrReach) {
-    if (p.publicVp <= 0 && plan.length === 0 && eliminated) return "not in the game yet";
-    if (eliminated) return "eliminated — nothing left to build to the target";
-    if (plan.length === 0) return "already at the target";
-    const counts = /* @__PURE__ */ new Map();
-    for (const s2 of plan) counts.set(s2.kind, (counts.get(s2.kind) ?? 0) + 1);
-    const label = {
-      city: ["city", "cities"],
-      settlement: ["settlement", "settlements"],
-      "largest-army": ["Largest Army", "Largest Army"],
-      "longest-road": ["Longest Road", "Longest Road"],
-      "vp-dev": ["VP dev card", "VP dev cards"]
-    };
-    const parts = [];
-    for (const [kind, n] of counts) parts.push(`${n} ${n > 1 ? label[kind][1] : label[kind][0]}`);
-    let s = parts.join(" + ");
-    if ((p.hiddenVp ?? 0) > 0) s = `(+${p.isYou ? "" : "~"}${p.hiddenVp} hidden) ` + s;
-    if ((p.citiesLeft ?? 1) === 0 && p.settlementsOnBoard > 0) s += " (no cities left)";
-    if (!laReach && !lrReach && (p.roadsLeft ?? 1) === 0) s += "; roads spent";
-    return s;
-  }
-  function analyzeVictory(players, ctx) {
-    const maxKnights = Math.max(0, ...players.map((p) => p.knightsPlayed));
-    const knightLeaders = players.filter((p) => p.knightsPlayed === maxKnights && maxKnights >= 3);
-    const maxRoad = Math.max(0, ...players.map((p) => p.longestRoadLen));
-    const roadLeaders = players.filter((p) => p.longestRoadLen === maxRoad && maxRoad >= 5);
-    const plans = players.map((p) => {
-      const holdsLA = knightLeaders.length === 1 && knightLeaders[0].name === p.name;
-      const holdsLR = roadLeaders.length === 1 && roadLeaders[0].name === p.name;
-      const knightsToLA = holdsLA ? 0 : Math.max(3, maxKnights + 1) - p.knightsPlayed;
-      const laReach = !holdsLA && knightsToLA >= 1 && (ctx.devDeckLeft === null || ctx.devDeckLeft >= knightsToLA);
-      const roadsToLR = holdsLR ? 0 : Math.max(5, maxRoad + 1) - p.longestRoadLen;
-      const lrReach = !holdsLR && roadsToLR >= 1 && (p.roadsLeft ?? 0) >= roadsToLR;
-      const gap = ctx.target - p.publicVp - (p.hiddenVp ?? 0);
-      const buys = buysFor(p, ctx, holdsLA, holdsLR, laReach, lrReach, knightsToLA, roadsToLR);
-      const maxAttainable = buys.reduce((s, b) => s + b.vp, 0);
-      const eliminated = gap > 0 && maxAttainable < gap;
-      const won = gap <= 0;
-      const chosen = won ? [] : cheapestPlan(buys, gap);
-      const steps = chosen.map((b) => ({ kind: b.kind, vp: b.vp, cost: b.cost, note: b.note }));
-      const planVp = steps.reduce((s, b) => s + b.vp, 0);
-      const totalCost = steps.reduce((acc, s) => addCost(acc, s.cost), {});
-      const need = {};
-      for (const r of RESOURCES) {
-        const n = (totalCost[r] ?? 0) - p.hand[r];
-        if (n > 0) need[r] = n;
-      }
-      const prodTotal = RESOURCES.reduce((s, r) => s + p.production[r], 0);
-      const weightedNeed = RESOURCES.reduce(
-        (s, r) => s + (need[r] ?? 0) * (p.production[r] > 0.05 ? 1 : 3),
-        0
-      );
-      const resourceTurns = weightedNeed / Math.max(prodTotal, 0.25);
-      const buildTurns = steps.length * 0.8;
-      const turnsToWin = won ? 0 : eliminated ? Infinity : Math.max(resourceTurns, buildTurns);
-      return {
-        name: p.name,
-        isYou: p.isYou,
-        publicVp: p.publicVp,
-        target: ctx.target,
-        eliminated,
-        steps,
-        planVp,
-        need,
-        turnsToWin,
-        winProb: 0,
-        largestArmyReachable: laReach,
-        longestRoadReachable: lrReach,
-        summary: summarise(p, steps, eliminated, laReach, lrReach)
-      };
-    });
-    const live = plans.filter((p) => !p.eliminated && Number.isFinite(p.turnsToWin));
-    const tmin = Math.min(...live.map((p) => p.turnsToWin), Infinity);
-    let wsum = 0;
-    const weights = plans.map((p) => {
-      if (p.eliminated || !Number.isFinite(p.turnsToWin)) return 0;
-      const w = Math.exp(-(p.turnsToWin - tmin) / TAU);
-      wsum += w;
-      return w;
-    });
-    plans.forEach((p, i) => {
-      p.winProb = wsum > 0 ? weights[i] / wsum : 0;
-    });
-    return plans.sort((a, b) => b.winProb - a.winProb);
-  }
   const RUSH_ACTIONS = /* @__PURE__ */ new Set([
     "build-settlement",
     "build-road",
@@ -4751,7 +4969,16 @@ html.cc-docked-page {
     try {
       const all = loadGameLogs();
       all.push(log);
-      localStorage.setItem(KEY, JSON.stringify(all.slice(-MAX_LOGS)));
+      const retained = all.slice(-MAX_LOGS);
+      while (retained.length) {
+        try {
+          localStorage.setItem(KEY, JSON.stringify(retained));
+          break;
+        } catch {
+          if (retained.length === 1) throw new Error("Game log exceeds storage quota");
+          retained.shift();
+        }
+      }
     } catch {
     }
   }
@@ -4917,6 +5144,7 @@ html.cc-docked-page {
     const mainGame = (opts == null ? void 0 : opts.setupPhase) !== void 0 ? !opts.setupPhase : bridge.turnState === 2;
     const send = (actions) => {
       if (actions.length === 0) return false;
+      recordDecision(d);
       window.postMessage({ [SEND_MARKER]: true, actions }, "*");
       return true;
     };
@@ -4959,7 +5187,8 @@ html.cc-docked-page {
         return send(bankTradeActions(bridge.myColor, giveId, d.trade.giveCount, getId));
       }
       case "play-monopoly": {
-        if (!d.resource) return false;
+        syncTrackerFromState();
+        if (!d.resource || !(tracker == null ? void 0 : tracker.youName) || confirmedMonopolyHaul(tracker.players.values(), tracker.youName, d.resource) <= 0) return false;
         return send(monopolyActions(RESOURCE_TO_CARD_ID[d.resource]));
       }
       case "play-knight":
@@ -5001,6 +5230,10 @@ html.cc-docked-page {
   }
   function pilotConfirm(kind) {
     (rushActive() ? rushPilot : autopilot).onConfirm(kind);
+    if (kind !== "play-monopoly") {
+      const action = [...decisionHistory].reverse().find((d) => d.decision.kind === kind && !d.outcome);
+      if (action) action.outcome = { confirmed: true, eventId: lastProcessedIndex };
+    }
   }
   const AUTOPILOT_PREF = "catanCopilot:autopilotOn";
   function loadAutopilotPref() {
@@ -5130,12 +5363,14 @@ html.cc-docked-page {
       pips: Math.round(productionTotal(expectedProduction(p)) * 36),
       devCards: p.devCards,
       knightsPlayed: p.knightsPlayed,
-      hand: p.name === you ? p.hand : void 0
-      // only our own cards are known
+      hand: p.trackingHealth === "exact" ? p.hand : void 0,
+      trackingHealth: p.trackingHealth ?? "incomplete"
     }));
     const fits = you ? rankLiveStrategies(tracker, you, strategyPriors(loadRecords())) : [];
     const gs = bridge.board ? bridge.toGameState() : null;
-    const advice = gs ? advisePlacement(gs.state, gs.youPlayer) : null;
+    let advice = gs ? advisePlacement(gs.state, gs.youPlayer, tracker.players.size) : null;
+    const planning = computePlanning();
+    if (advice && planning && gs) advice = planningAdvice(advice, planning, gs.state);
     return {
       at: (/* @__PURE__ */ new Date()).toISOString(),
       you,
@@ -5174,8 +5409,107 @@ html.cc-docked-page {
     } catch {
     }
   }
-  function syncTrackerFromState() {
+  const rawEvents = /* @__PURE__ */ new Map();
+  const decisionHistory = [];
+  let handLedger = null;
+  let restoredHandSnapshot = null;
+  let historyComplete = false;
+  let planningRevision = 0;
+  let planningCache = null;
+  const journalKey = () => `catanCopilot:ledger:${location.href}`;
+  const boardKey = () => {
+    var _a;
+    return JSON.stringify(((_a = bridge.board) == null ? void 0 : _a.hexes.map((h) => [h.q, h.r, h.kind, h.token])) ?? []);
+  };
+  function syncLedger() {
+    var _a, _b, _c;
+    if (!(tracker == null ? void 0 : tracker.youName) || tracker.players.size !== 2 || bridge.myColor === null) return;
+    const opponent = [...tracker.players.values()].find((p) => p.name !== tracker.youName);
+    if (!handLedger || handLedger.you !== tracker.youName || handLedger.opponent !== opponent.name) {
+      handLedger = new HandLedger(tracker.youName, opponent.name, historyComplete);
+      for (const [id, event] of rawEvents) handLedger.record(id, event);
+      if (restoredHandSnapshot) {
+        handLedger.project(restoredHandSnapshot);
+        restoredHandSnapshot = null;
+      }
+    }
+    const ownCards = (_c = (_b = (_a = bridge.state.playerStates) == null ? void 0 : _a[String(bridge.myColor)]) == null ? void 0 : _b.resourceCards) == null ? void 0 : _c.cards;
+    if (!Array.isArray(ownCards) || ownCards.some((id) => id < 1 || id > 5) || opponent.serverCards === null) {
+      opponent.trackingHealth = "repairing";
+      opponent.trackingReason = "Waiting for a complete private hand and opponent total";
+      return;
+    }
+    if (!rawEvents.has(0) || rawEvents.size !== lastProcessedIndex + 1) {
+      opponent.trackingHealth = historyComplete ? "repairing" : "incomplete";
+      opponent.trackingReason = "Missing log rows; retained history must be completed before claiming an exact hand";
+      return;
+    }
+    const mine = tracker.players.get(tracker.youName);
+    const result = handLedger.project({ mine: { ...mine.hand }, opponentTotal: opponent.serverCards });
+    opponent.trackingHealth = result.health;
+    opponent.trackingReason = result.reason;
+    if (result.opponent) {
+      opponent.hand = result.opponent;
+      opponent.uncertainty = 0;
+      persistJournal();
+    } else opponent.uncertainty = Math.max(1, Math.abs(handTotal(opponent) - opponent.serverCards));
+  }
+  function persistJournal() {
+    try {
+      localStorage.setItem(journalKey(), JSON.stringify({
+        board: boardKey(),
+        complete: historyComplete,
+        events: [...rawEvents],
+        decisions: decisionHistory,
+        snapshot: handLedger == null ? void 0 : handLedger.lastSnapshot
+      }));
+    } catch {
+    }
+  }
+  function recordDecision(decision) {
+    var _a;
     if (!tracker) return;
+    const previous = decisionHistory[decisionHistory.length - 1];
+    if ((previous == null ? void 0 : previous.decision.kind) === "play-monopoly" && previous.decision.resource && !previous.outcome) {
+      const between = [...rawEvents].filter(([id]) => id > previous.eventIndex).map(([, event]) => event);
+      const played = between.some((e) => e.type === "use-dev" && e.card === "monopoly" && e.player === tracker.youName);
+      const opponentTurn = between.some((e) => e.type === "roll" && e.player !== tracker.youName);
+      const opponent = [...tracker.players.values()].find((p) => p.name !== tracker.youName);
+      const before = previous.hands.find((p) => p.name === (opponent == null ? void 0 : opponent.name));
+      if (played && !opponentTurn && (opponent == null ? void 0 : opponent.trackingHealth) === "exact" && before) {
+        const resource = previous.decision.resource;
+        const cards = before.hand[resource] - opponent.hand[resource];
+        if (cards >= 0) previous.outcome = { confirmed: true, resource, cards, eventId: lastProcessedIndex };
+      }
+    }
+    decisionHistory.push({
+      t: Date.now(),
+      eventIndex: lastProcessedIndex,
+      decision,
+      hands: [...tracker.players.values()].map((p) => ({
+        name: p.name,
+        hand: { ...p.hand },
+        total: p.serverCards,
+        health: p.trackingHealth ?? "incomplete",
+        publicVp: visibleVp(p)
+      })),
+      buildings: bridge.buildings,
+      roads: bridge.roads,
+      position: (() => {
+        const gs = bridge.toGameState();
+        return gs ? structuredClone({ buildings: gs.state.buildings, roads: gs.state.roads }) : void 0;
+      })(),
+      planningInputs: structuredClone((_a = computePlanning()) == null ? void 0 : _a.inputs.map(({ settlementRoutes: settlementRoutes2, cityProduction, longestRoadPath, ...input }) => input)),
+      devCardIds: bridge.myDevCardIds(),
+      bankDevCards: bridge.bankDevCards,
+      robberHex: bridge.robberHex
+    });
+    persistJournal();
+  }
+  function syncTrackerFromState() {
+    var _a, _b, _c;
+    if (!tracker) return;
+    planningRevision++;
     const myColor = bridge.myColor;
     if (myColor !== null && !tracker.youName) {
       tracker.youName = bridge.colorToName.get(myColor) ?? tracker.youName;
@@ -5187,8 +5521,11 @@ html.cc-docked-page {
       p.serverCards = hand.total;
       p.serverVp = bridge.publicVp(color);
       if (color === myColor) {
-        for (const r of RESOURCES) p.hand[r] = hand.known[r] ?? 0;
-        p.uncertainty = 0;
+        const cards = (_c = (_b = (_a = bridge.state.playerStates) == null ? void 0 : _a[String(color)]) == null ? void 0 : _b.resourceCards) == null ? void 0 : _c.cards;
+        const exact = Array.isArray(cards) && cards.every((id) => id >= 1 && id <= 5);
+        if (exact) for (const r of RESOURCES) p.hand[r] = hand.known[r] ?? 0;
+        p.uncertainty = exact ? 0 : 1;
+        p.trackingHealth = exact ? "exact" : "repairing";
       } else {
         reconcileHandWithTotal(p);
       }
@@ -5200,6 +5537,7 @@ html.cc-docked-page {
       const limit = bridge.discardLimit(myColor);
       if (limit !== null) tracker.discardLimit = limit;
     }
+    syncLedger();
   }
   function domSaysYourTurn() {
     return domHasText(YOUR_TURN_BANNER) || rollPromptVisible();
@@ -5248,8 +5586,10 @@ html.cc-docked-page {
     const row = document.querySelector("[data-index]");
     return row ? row.parentElement : null;
   }
-  function computeWinChances() {
-    if (!tracker) return [];
+  function computePlanning() {
+    var _a, _b, _c, _d, _e, _f;
+    if ((planningCache == null ? void 0 : planningCache.revision) === planningRevision) return planningCache.value;
+    if (!(tracker == null ? void 0 : tracker.youName) || !tracker.players.has(tracker.youName)) return null;
     const gs = bridge.board ? bridge.toGameState() : null;
     const order = bridge.colorOrder();
     const inputs = [];
@@ -5266,9 +5606,10 @@ html.cc-docked-page {
         spotOpen = bestPlaceableNow(gs.state, pid) !== null;
       }
       const isYou = name === tracker.youName;
-      const hiddenVp = isYou ? bridge.myDevCardIds().filter((id) => id === 12).length : Math.min(5, Math.round(Math.max(0, p.devCards) * 0.25));
+      const hiddenVp = isYou ? bridge.myDevCardIds().filter((id) => id === 12).length : Math.min(5, Math.max(0, p.devCards) * (5 / 25));
       inputs.push({
         name,
+        playerId: pid,
         isYou,
         publicVp: bridge.publicVp(color),
         hiddenVp,
@@ -5280,11 +5621,30 @@ html.cc-docked-page {
         knightsPlayed: p.knightsPlayed,
         longestRoadLen: bridge.longestRoad(color),
         hand: p.hand,
-        production: expectedProduction(p)
+        production: gs && pid >= 0 && pid <= 3 ? playerProduction(gs.state, pid) : expectedProduction(p),
+        cityProduction: gs ? gs.state.buildings.filter((b) => b.player === pid && b.kind === "settlement").map((b) => vertexIncome(gs.state, b.vertexId, 1)) : void 0,
+        bankRatios: bridge.bankRatios(color),
+        rollsPerTurn: tracker.players.size,
+        holdsLargestArmy: (((_c = (_b = (_a = bridge.state.playerStates) == null ? void 0 : _a[String(color)]) == null ? void 0 : _b.victoryPointsState) == null ? void 0 : _c["3"]) ?? 0) > 0,
+        holdsLongestRoad: (((_f = (_e = (_d = bridge.state.playerStates) == null ? void 0 : _d[String(color)]) == null ? void 0 : _e.victoryPointsState) == null ? void 0 : _f["2"]) ?? 0) > 0,
+        knightsInHand: isYou ? bridge.myDevCardIds().filter((id) => id === 11).length : 0,
+        playableKnights: isYou ? bridge.myDevCardIds().filter((id) => id === 11).length : 0,
+        settlementRoutes: gs && pid >= 0 && pid <= 3 ? settlementRoutes(gs.state, pid) : void 0
       });
     }
-    if (inputs.length === 0) return [];
-    return analyzeVictory(inputs, { target: bridge.winTarget, devDeckLeft: bridge.bankDevCards });
+    if (!inputs.some((p) => p.isYou)) return null;
+    const targetRoad = Math.max(5, 1 + Math.max(...inputs.map((p) => p.longestRoadLen)));
+    if (gs) for (const p of inputs) {
+      if (p.playerId === void 0) continue;
+      p.longestRoadPath = p.holdsLongestRoad ? null : roadBonusPath(gs.state, p.playerId, targetRoad, p.roadsLeft ?? 0);
+    }
+    const value = planPosition(tracker, tracker.youName, gs, { inputs, robberHex: bridge.robberHex, target: bridge.winTarget, devDeckLeft: bridge.bankDevCards });
+    planningCache = { revision: planningRevision, value };
+    return value;
+  }
+  function computeWinChances() {
+    var _a;
+    return ((_a = computePlanning()) == null ? void 0 : _a.victories) ?? [];
   }
   function scheduleRender() {
     if (renderTimer !== void 0) return;
@@ -5352,11 +5712,30 @@ html.cc-docked-page {
     const idxAttr = el.getAttribute("data-index");
     if (idxAttr === null) return;
     const idx = parseInt(idxAttr, 10);
-    if (Number.isNaN(idx) || idx <= lastProcessedIndex) return;
-    lastProcessedIndex = idx;
+    if (Number.isNaN(idx)) return;
     const ev = parseLogRow(el);
-    applyEvent(tracker, ev);
-    recordMove(ev);
+    const previous = rawEvents.get(idx);
+    if (previous && JSON.stringify(previous) === JSON.stringify(ev)) return;
+    lastProcessedIndex = Math.max(lastProcessedIndex, idx);
+    rawEvents.set(idx, ev);
+    if (!historyComplete && rawEvents.has(0) && rawEvents.size === lastProcessedIndex + 1) {
+      const paid = new Set([...rawEvents.values()].filter((e) => e.type === "starting-resources").map((e) => e.player));
+      if (paid.size === 2) {
+        historyComplete = true;
+        if (handLedger) handLedger.complete = true;
+      }
+    }
+    handLedger == null ? void 0 : handLedger.record(idx, ev);
+    const rebuilt = createTracker(tracker.youName);
+    for (const [, event] of [...rawEvents].sort(([a], [b]) => a - b)) applyEvent(rebuilt, event);
+    tracker = rebuilt;
+    if (!previous || previous.type === "ignored") recordMove(ev);
+    syncTrackerFromState();
+    if (ev.type === "monopoly-steal" && ev.player === tracker.youName) {
+      const action = [...decisionHistory].reverse().find((d) => d.decision.kind === "play-monopoly" && !d.outcome && d.eventIndex < idx);
+      if (action) action.outcome = { confirmed: true, resource: ev.resource, cards: ev.count, eventId: idx };
+    }
+    persistJournal();
     const you = tracker.youName;
     if (you) {
       if (ev.type === "roll" && ev.player === you) {
@@ -5364,7 +5743,7 @@ html.cc-docked-page {
         autopilot.onYouRolled();
       } else if (ev.type === "buy-dev" && ev.player === you) {
         learner.confirm("buy-dev");
-        autopilot.onConfirm("buy-dev");
+        pilotConfirm("buy-dev");
       } else if (ev.type === "move-robber" && ev.player === you) {
         learner.confirm("move-robber");
         pilotConfirm("move-robber");
@@ -5372,7 +5751,7 @@ html.cc-docked-page {
         learner.confirm("discard");
         pilotConfirm("discard");
       } else if (ev.type === "bank-trade" && ev.player === you) {
-        autopilot.onConfirm("bank-trade");
+        pilotConfirm("bank-trade");
       } else if (ev.type === "use-knight" && ev.player === you) {
         learner.confirm("play-knight");
         autopilot.onConfirm("play-knight");
@@ -5385,7 +5764,7 @@ html.cc-docked-page {
     }
     if (ev.type === "game-over" && !gameRecorded) {
       gameRecorded = true;
-      recordGameEnd(tracker);
+      if (historyComplete) recordGameEnd(tracker);
       saveFullGameLog();
     }
     scheduleRender();
@@ -5395,7 +5774,7 @@ html.cc-docked-page {
     var _a;
     if (!tracker) return;
     const you = tracker.youName;
-    const winnerEntry = [...tracker.players.values()].find((p) => visibleVp(p) >= 10);
+    const winnerEntry = [...tracker.players.values()].find((p) => visibleVp(p) >= bridge.winTarget);
     const winner = typeof tracker.gameOver === "string" ? tracker.gameOver : (winnerEntry == null ? void 0 : winnerEntry.name) ?? null;
     const fits = you ? rankLiveStrategies(tracker, you, strategyPriors(loadRecords())) : [];
     const log = {
@@ -5408,7 +5787,7 @@ html.cc-docked-page {
       playerCount: tracker.players.size,
       settings: {
         friendlyRobber: bridge.friendlyRobber,
-        victoryPointsToWin: null,
+        victoryPointsToWin: bridge.winTarget,
         discardLimit: tracker.discardLimit
       },
       recommendedStrategy: ((_a = fits[0]) == null ? void 0 : _a.strategy.name) ?? null,
@@ -5437,7 +5816,11 @@ html.cc-docked-page {
           pips: vertexPips(gs.state.board, b.vertexId)
         }));
       })(),
-      moves: moveHistory.slice()
+      moves: moveHistory.slice(),
+      boardGeometry: bridge.board ?? void 0,
+      complete: historyComplete && rawEvents.size === lastProcessedIndex + 1 && tracker.players.size >= 2 && winner !== null,
+      events: [...rawEvents].sort(([a], [b]) => a - b).map(([id, event]) => ({ id, event })),
+      decisions: decisionHistory.slice()
     };
     saveGameLog(log);
     try {
@@ -5459,8 +5842,27 @@ html.cc-docked-page {
   let observedScroller = null;
   function attach(scroller) {
     tracker = createTracker(getYouName());
+    handLedger = null;
+    restoredHandSnapshot = null;
+    rawEvents.clear();
+    decisionHistory.length = 0;
+    historyComplete = bridge.turnState === 0 && bridge.buildings.length < 3;
+    try {
+      const saved = JSON.parse(localStorage.getItem(journalKey()) ?? "null");
+      if ((saved == null ? void 0 : saved.board) === boardKey() && Array.isArray(saved.events)) {
+        historyComplete = saved.complete === true;
+        restoredHandSnapshot = saved.snapshot ?? null;
+        if (Array.isArray(saved.decisions)) decisionHistory.push(...saved.decisions);
+        for (const [id, event] of saved.events) {
+          rawEvents.set(id, event);
+          applyEvent(tracker, event);
+        }
+      }
+    } catch {
+    }
+    planningRevision++;
+    lastProcessedIndex = Math.max(-1, ...rawEvents.keys());
     syncTrackerFromState();
-    lastProcessedIndex = -1;
     observedScroller = scroller;
     gameRecorded = false;
     prevTurnColor = null;
@@ -5475,6 +5877,7 @@ html.cc-docked-page {
         onDownloadCapture: downloadCapture,
         getAutopilotView: () => autopilot.view(),
         getWinChances: () => computeWinChances(),
+        getPlanning: () => computePlanning(),
         getRushView: () => ({ ...rushPilot.view(), active: rushActive(), pref: rushPref, modeSetting: bridge.modeSetting }),
         onSetRushPref: (pref) => {
           rushPref = pref;
@@ -5537,7 +5940,9 @@ html.cc-docked-page {
     rushPilot.setRobberPending(domSaysMoveRobber());
     rushPilot.setDiscardPending(domSaysDiscard());
     const gs = bridge.board ? bridge.toGameState() : null;
-    const advice = gs ? advisePlacement(gs.state, gs.youPlayer) : null;
+    let advice = gs ? advisePlacement(gs.state, gs.youPlayer, tracker.players.size) : null;
+    const planning = computePlanning();
+    if (advice && planning && gs) advice = planningAdvice(advice, planning, gs.state);
     const fits = rankLiveStrategies(tracker, tracker.youName, strategyPriors(loadRecords()));
     const colorOrder = bridge.colorOrder();
     const canRob = (player) => {
@@ -5574,7 +5979,9 @@ html.cc-docked-page {
     autopilot.setRobberPending(domSaysMoveRobber());
     autopilot.setDiscardPending(domSaysDiscard());
     const gs = bridge.board ? bridge.toGameState() : null;
-    const advice = gs ? advisePlacement(gs.state, gs.youPlayer) : null;
+    let advice = gs ? advisePlacement(gs.state, gs.youPlayer, tracker.players.size) : null;
+    const planning = computePlanning();
+    if (advice && planning && gs) advice = planningAdvice(advice, planning, gs.state);
     const fits = rankLiveStrategies(tracker, tracker.youName, strategyPriors(loadRecords()));
     const colorOrder = bridge.colorOrder();
     const canRob = (player) => {
@@ -5595,20 +6002,11 @@ html.cc-docked-page {
       myDevCardIds: bridge.myDevCardIds(),
       tradeOffers: bridge.pendingTradeOffers(),
       winTarget: bridge.winTarget,
-      endgameStep: ourEndgameStep(),
+      planning: planning ?? void 0,
       playerCount: bridge.colorToName.size
     });
     if (bridge.myOpenOffer()) autopilot.onConfirm("propose-trade");
     scheduleRender();
   }, 1500);
-  function ourEndgameStep() {
-    var _a;
-    const mine = computeWinChances().find((p) => p.isYou);
-    const step = (_a = mine == null ? void 0 : mine.steps[0]) == null ? void 0 : _a.kind;
-    if (!step) return void 0;
-    if (step === "city" || step === "settlement") return step;
-    if (step === "longest-road") return "road";
-    return "dev";
-  }
   watchForGame();
 })();

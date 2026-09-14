@@ -840,7 +840,8 @@ export class Overlay {
           </tr>
           <tr><td colspan="5" style="text-align:left;padding-left:18px"><div class="cc-hand">${hand}</div></td></tr>`;
       });
-    const mode = isOneVsOne(state) ? ` <span class="cc-muted">(1v1 — first to 15 VP)</span>` : "";
+    const target = this.hooks.getPlanning?.()?.victories[0]?.target;
+    const mode = isOneVsOne(state) ? ` <span class="cc-muted">(1v1${target ? ` — first to ${target} VP` : ""})</span>` : "";
     return `
       <h4>Players${mode}</h4>
       <table>

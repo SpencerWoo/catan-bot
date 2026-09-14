@@ -14,6 +14,7 @@ const dom = new JSDOM(
   { runScripts: "outside-only", pretendToBeVisual: true, url: "https://colonist.io/" },
 );
 const { window } = dom;
+window.structuredClone = structuredClone;
 // Simulate a stopped local bridge: rejected fetches must not stop the overlay.
 let bridgeAttempts = 0;
 window.fetch = async () => {
@@ -72,8 +73,8 @@ const checks = [
   ["board captured from real protocol", overlay.querySelectorAll("svg polygon").length === 19],
   ["players from roster", text.includes("LadyboyNick") && text.includes("Sera")],
   ["you-detection", text.includes("(you)")],
-  ["strategy section", text.includes("Your strategy")],
-  ["recommendation", text.includes("RECOMMENDED")],
+  ["shared race horizon", text.includes("Remaining game (estimate)")],
+  ["continuous production valuation", text.includes("Production investments are valued over that horizon")],
   ["balanced-dice deck", text.includes("Balanced-dice deck")],
   ["deck counting (an 8 and a 6 drawn: 34 left)", text.includes("34 cards left")],
   ["placement heading", text.includes("here") || text.includes("Expand") || text.includes("Best open spots")],

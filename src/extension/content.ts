@@ -1,4 +1,4 @@
-import { HandLedger, confirmedMonopolyHaul } from "./handLedger";
+import { HandLedger, HandSnapshot, confirmedMonopolyHaul } from "./handLedger";
 import { PlanningContext, planPosition, settlementRoutes, roadBonusPath, planningAdvice, vertexIncome } from "./planning";
 import { playerProduction } from "../engine/analysis";
 import { parseLogRow } from "./logParser";
@@ -400,6 +400,7 @@ function postLiveState(): void {
 const rawEvents = new Map<number, GameEvent>();
 const decisionHistory: NonNullable<GameLog["decisions"]> = [];
 let handLedger: HandLedger | null = null;
+let restoredHandSnapshot: HandSnapshot | null = null;
 let historyComplete = false;
 let planningRevision = 0;
 let planningCache: { revision: number; value: PlanningContext | null } | null = null;
@@ -412,6 +413,7 @@ function syncLedger(): void {
   if (!handLedger || handLedger.you !== tracker.youName || handLedger.opponent !== opponent.name) {
     handLedger = new HandLedger(tracker.youName, opponent.name, historyComplete);
     for (const [id, event] of rawEvents) handLedger.record(id, event);
+    if (restoredHandSnapshot) { handLedger.project(restoredHandSnapshot); restoredHandSnapshot = null; }
   }
   const ownCards = bridge.state.playerStates?.[String(bridge.myColor)]?.resourceCards?.cards;
   if (!Array.isArray(ownCards) || ownCards.some((id) => id < 1 || id > 5) || opponent.serverCards === null) {
@@ -428,8 +430,13 @@ function syncLedger(): void {
   const result = handLedger.project({ mine: { ...mine.hand }, opponentTotal: opponent.serverCards });
   opponent.trackingHealth = result.health;
   opponent.trackingReason = result.reason;
-  if (result.opponent) { opponent.hand = result.opponent; opponent.uncertainty = 0; }
+  if (result.opponent) { opponent.hand = result.opponent; opponent.uncertainty = 0; persistJournal(); }
   else opponent.uncertainty = Math.max(1, Math.abs(handTotal(opponent) - opponent.serverCards));
+}
+
+function persistJournal(): void {
+  try { localStorage.setItem(journalKey(), JSON.stringify({ board: boardKey(), complete: historyComplete,
+    events: [...rawEvents], decisions: decisionHistory, snapshot: handLedger?.lastSnapshot })); } catch { /* export remains available */ }
 }
 
 function recordDecision(decision: AutopilotDecision): void {
@@ -458,6 +465,7 @@ function recordDecision(decision: AutopilotDecision): void {
     devCardIds: bridge.myDevCardIds(), bankDevCards: bridge.bankDevCards,
     robberHex: bridge.robberHex,
   });
+  persistJournal();
 }
 
 function syncTrackerFromState(): void {
@@ -752,7 +760,7 @@ function processRow(el: Element): void {
     const action = [...decisionHistory].reverse().find((d) => d.decision.kind === "play-monopoly" && !d.outcome && d.eventIndex < idx);
     if (action) action.outcome = { confirmed: true, resource: ev.resource, cards: ev.count, eventId: idx };
   }
-  try { localStorage.setItem(journalKey(), JSON.stringify({ board: boardKey(), complete: historyComplete, events: [...rawEvents], decisions: decisionHistory })); } catch { /* export remains available */ }
+  persistJournal();
 
   // Log-confirmed actions close the learner/autopilot loop for actions that
   // have no dedicated WebSocket event we track.
@@ -763,7 +771,7 @@ function processRow(el: Element): void {
       autopilot.onYouRolled();
     } else if (ev.type === "buy-dev" && ev.player === you) {
       learner.confirm("buy-dev");
-      autopilot.onConfirm("buy-dev");
+      pilotConfirm("buy-dev");
     } else if (ev.type === "move-robber" && ev.player === you) {
       // Fallback confirmation via the log (player-attributed), in case the
       // banner cleared before the MOVE_ROBBER frame was seen.
@@ -773,7 +781,7 @@ function processRow(el: Element): void {
       learner.confirm("discard");
       pilotConfirm("discard");
     } else if (ev.type === "bank-trade" && ev.player === you) {
-      autopilot.onConfirm("bank-trade");
+      pilotConfirm("bank-trade");
     } else if (ev.type === "use-knight" && ev.player === you) {
       learner.confirm("play-knight");
       autopilot.onConfirm("play-knight");
@@ -881,6 +889,7 @@ let observedScroller: HTMLElement | null = null;
 function attach(scroller: HTMLElement): void {
   tracker = createTracker(getYouName());
   handLedger = null;
+  restoredHandSnapshot = null;
   rawEvents.clear();
   decisionHistory.length = 0;
   historyComplete = bridge.turnState === 0 && bridge.buildings.length < 3;
@@ -888,6 +897,7 @@ function attach(scroller: HTMLElement): void {
     const saved = JSON.parse(localStorage.getItem(journalKey()) ?? "null");
     if (saved?.board === boardKey() && Array.isArray(saved.events)) {
       historyComplete = saved.complete === true;
+      restoredHandSnapshot = saved.snapshot ?? null;
       if (Array.isArray(saved.decisions)) decisionHistory.push(...saved.decisions);
       for (const [id, event] of saved.events as Array<[number, GameEvent]>) {
         rawEvents.set(id, event); applyEvent(tracker, event);

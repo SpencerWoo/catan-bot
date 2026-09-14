@@ -45,6 +45,14 @@ describe("1v1 conservation ledger", () => {
     ledger.record(6, { type: "discard", player: "Them", resources: { ore: 1 } });
     expect(ledger.project({ mine: hand(1), opponentTotal: 2 })).toMatchObject({ health: "exact", opponent: hand(1, 1) });
   });
+  it("anchors repaired steals so a later equal-size trade cannot accept a stale hand", () => {
+    const ledger = opening();
+    ledger.record(3, { type: "steal-unknown", thief: "Us", victim: "Them" });
+    expect(ledger.project({ mine: hand(2, 1), opponentTotal: 2 }).health).toBe("exact");
+    ledger.record(4, { type: "player-trade", player: "Us", partner: "Them", delta: { wood: -1, ore: 1 } });
+    expect(ledger.project({ mine: hand(2, 1), opponentTotal: 2 }).health).toBe("repairing");
+    expect(ledger.project({ mine: hand(1, 2), opponentTotal: 2 })).toMatchObject({ health: "exact", opponent: hand(1, 1) });
+  });
   it("does not call missing history exact or repair a contradiction by trimming", () => {
     expect(new HandLedger("Us", "Them").project({ mine: hand(), opponentTotal: 10 }).health).toBe("incomplete");
     expect(opening().project({ mine: hand(), opponentTotal: 10 }).opponent).toBeNull();
