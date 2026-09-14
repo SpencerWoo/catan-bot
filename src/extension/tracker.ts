@@ -1,5 +1,6 @@
 import { RESOURCES, Resource, pips } from "../engine/types";
 import { GameEvent, ResourceDelta } from "./events";
+import { TrackingHealth } from "./handLedger";
 import { GameState } from "../engine/types";
 import { colonistIdForColor } from "./placement";
 
@@ -12,6 +13,8 @@ export interface PlayerState {
   hand: Record<Resource, number>;
   /** cards whose identity we couldn't determine (unknown steals) */
   uncertainty: number;
+  trackingHealth?: TrackingHealth;
+  trackingReason?: string;
   settlements: number;
   cities: number;
   roads: number;
@@ -76,6 +79,7 @@ function getPlayer(state: TrackerState, name: string, color = "#888", playerId: 
       playerId,
       hand: emptyHand(),
       uncertainty: 0,
+      trackingHealth: "incomplete",
       settlements: 0,
       cities: 0,
       roads: 0,
@@ -229,9 +233,7 @@ export function applyEvent(state: TrackerState, ev: GameEvent): void {
       if (victim) {
         const v = getPlayer(state, victim);
         v.uncertainty++;
-        // best effort: remove one card from their biggest pile
-        const biggest = RESOURCES.reduce((a, b) => (v.hand[a] >= v.hand[b] ? a : b));
-        if (v.hand[biggest] > 0) v.hand[biggest]--;
+        v.trackingHealth = "repairing";
       }
       break;
     }
@@ -352,24 +354,15 @@ export function handTotal(p: PlayerState): number {
   return RESOURCES.reduce((s, r) => s + p.hand[r], 0);
 }
 
-/**
- * Reconcile an opponent's estimated hand with colonist's authoritative card
- * TOTAL (serverCards). The log-derived estimate can only drift: a missed or
- * mis-parsed spend leaves phantom cards forever ("two sheep" when they hold
- * one). Over the total: trim from the biggest piles — the likeliest home of a
- * phantom card. Under the total: the gap is cards we never saw, surfaced as
- * uncertainty rather than invented. No-op without a server total.
- */
+/** Check totals without inventing which resources were spent. */
 export function reconcileHandWithTotal(p: PlayerState): void {
   if (p.serverCards === null) return;
-  let total = handTotal(p);
-  while (total > p.serverCards) {
-    const biggest = RESOURCES.reduce((a, b) => (p.hand[a] >= p.hand[b] ? a : b));
-    if (p.hand[biggest] === 0) break;
-    p.hand[biggest]--;
-    total--;
+  const mismatch = Math.abs(p.serverCards - handTotal(p));
+  if (mismatch > 0) {
+    p.uncertainty = Math.max(p.uncertainty, mismatch);
+    p.trackingHealth = "repairing";
+    p.trackingReason = "Resource ledger and server total disagree";
   }
-  p.uncertainty = Math.max(0, p.serverCards - total);
 }
 
 /**

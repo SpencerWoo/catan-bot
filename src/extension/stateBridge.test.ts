@@ -59,14 +59,15 @@ describe("StateBridge (real capture)", () => {
     b.apply(91, {
       diff: {
         playerStates: {
-          "1": { victoryPointsState: { "0": 4, "1": 1, "4": 1 } }, // 4 settlements + 1 city(2) + 1 VP card = 7
+          "1": { victoryPointsState: { "0": 4, "1": 1, "2": 1 } }, // 4 settlements + 1 city(2) + 1 VP card = 7
           "2": { victoryPointsState: { "0": 4, "3": 1 } }, // 4 settlements + Largest Army = 6 (flag stored as 1)
-          "3": { victoryPointsState: { "0": 2, "2": 1 } }, // 2 settlements + Longest Road = 4
+          "3": { victoryPointsState: { "0": 2, "4": 1 } }, // 2 settlements + Longest Road = 4
           "4": { victoryPointsState: { "0": 2, "1": 4 } }, // 2 settlements + 4 cities = 10 (real 15-9 game: we had this + army + 3 VP cards = 15)
         },
       },
     });
-    expect(b.publicVp(1)).toBe(7);
+    expect(b.publicVp(1)).toBe(6); // held VP is added separately, once
+    expect(b.publicVp(1)! + 1).toBe(7);
     expect(b.publicVp(2)).toBe(6); // NOT 5 — Largest Army is worth 2
     expect(b.publicVp(3)).toBe(4); // NOT 3 — Longest Road is worth 2
     expect(b.publicVp(4)).toBe(10); // cities are 2 each, not +1
@@ -137,4 +138,22 @@ describe("StateBridge (real capture)", () => {
     expect(gs.state.board.hexes).toHaveLength(19);
     expect(gs.youPlayer).not.toBeNull();
   });
+});
+
+it("separates a held VP card from the authoritative Longest Road owner", () => {
+  const b = new StateBridge();
+  // Minimal fields from the simpy protocol capture, not inferred from the UI.
+  b.apply(91, { diff: { playerStates: {
+    '5': { victoryPointsState: { '0': 1, '1': 3, '2': 1 } },
+    '2': { victoryPointsState: { '0': 3, '1': 3, '3': 1, '4': 1 } },
+  }, mechanicLongestRoadState: {
+    '5': { longestRoad: 2, hasLongestRoad: false },
+    '2': { longestRoad: 5, hasLongestRoad: true },
+  } } });
+  expect(b.publicVp(5)).toBe(7);
+  expect(b.publicVp(2)).toBe(13);
+  expect(b.holdsLongestRoad(5)).toBe(false);
+  expect(b.holdsLongestRoad(2)).toBe(true);
+  b.apply(91, { diff: { mechanicLongestRoadState: { '2': { hasLongestRoad: false } } } });
+  expect(b.holdsLongestRoad(2)).toBe(false);
 });

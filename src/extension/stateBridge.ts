@@ -73,7 +73,7 @@ interface GameStateShape {
     >;
   };
   mechanicRobberState?: { locationTileIndex?: number };
-  mechanicLongestRoadState?: Record<string, { longestRoad?: number }>;
+  mechanicLongestRoadState?: Record<string, { longestRoad?: number; hasLongestRoad?: boolean }>;
   mechanicDevelopmentCardsState?: {
     bankDevelopmentCards?: { cards?: number[] };
     players?: Record<string, { developmentCards?: { cards?: number[] } }>;
@@ -195,20 +195,14 @@ export class StateBridge {
     return Array.isArray(cards) ? cards.length : null;
   }
 
-  /** a player's total public victory points (sum of victoryPointsState). */
-  /**
-   * Public victory points from colonist's victoryPointsState breakdown. The
-   * keys are VP SOURCES whose values are NOT uniformly points (decoded from
-   * captures): buildings and VP dev cards store points directly, but Longest
-   * Road and Largest Army are stored as a flag of 1 and are each worth 2 VP —
-   * summing raw undercounts a bonus holder by 1.
-   *   0 = settlements (count, 1 VP each)   1 = cities (count, 2 VP each —
-   *       a settlement leaves key 0 when it's upgraded: {"0":1,"1":1} = 3 VP)
-   *   2 = Longest Road (flag → 2)          3 = Largest Army (flag → 2)
-   *   4 = victory-point dev cards (points)
-   * Verified against a real 15-9 game that the old "+1 per city" weighting
-   * reported as 11-6 (4 and 2 cities under-counted by one each).
-   */
+  /** Wire sources verified against the September 14 protocol capture:
+   * 0 settlements, 1 cities, 2 private VP cards, 3 army, 4 longest road.
+   * Held VP cards are counted separately from public points. */
+  holdsLongestRoad(color: number): boolean {
+    return this.state.mechanicLongestRoadState?.[String(color)]?.hasLongestRoad
+      ?? ((this.state.playerStates?.[String(color)]?.victoryPointsState?.["4"] ?? 0) > 0);
+  }
+
   publicVp(color: number): number {
     const vp = this.state.playerStates?.[String(color)]?.victoryPointsState;
     if (!vp) return 0;
@@ -216,8 +210,8 @@ export class StateBridge {
     for (const [k, n] of Object.entries(vp)) {
       const v = (n as number) ?? 0;
       if (k === "1") total += v * 2;
-      else if (k === "2" || k === "3") total += v > 0 ? 2 : 0;
-      else total += v;
+      else if (k === "4" || k === "3") total += v > 0 ? 2 : 0;
+      else if (k === "0") total += v;
     }
     return total;
   }

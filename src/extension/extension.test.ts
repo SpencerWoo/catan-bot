@@ -183,7 +183,7 @@ describe("tracker", () => {
     expect(visibleVp(ava)).toBe(1);
   });
 
-  it("reconciles an opponent's estimated hand with the server card total", () => {
+  it("flags a contradictory hand without inventing a reconciliation", () => {
     // Bug report: the overlay said an opponent held 2 sheep when they held 1 —
     // a missed spend left a phantom card forever. The WS total is truth.
     const t = createTracker("Nick");
@@ -192,14 +192,14 @@ describe("tracker", () => {
 
     ava.serverCards = 3; // they actually hold 3 — one of our 4 is phantom
     reconcileHandWithTotal(ava);
-    expect(handTotal(ava)).toBe(3);
-    expect(ava.hand.sheep).toBe(1); // trimmed from the biggest pile
-    expect(ava.uncertainty).toBe(0);
+    expect(handTotal(ava)).toBe(4);
+    expect(ava.hand.sheep).toBe(2); // preserve evidence until the ledger is repaired
+    expect(ava.trackingHealth).toBe("repairing");
 
     ava.serverCards = 5; // they hold more than we've identified
     reconcileHandWithTotal(ava);
-    expect(handTotal(ava)).toBe(3); // never invent cards...
-    expect(ava.uncertainty).toBe(2); // ...just know two are unidentified
+    expect(handTotal(ava)).toBe(4); // never invent cards...
+    expect(ava.uncertainty).toBeGreaterThan(0);
 
     ava.serverCards = null; // no WS truth -> leave the estimate alone
     ava.hand.sheep = 4;

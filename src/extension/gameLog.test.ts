@@ -44,7 +44,13 @@ describe("game logs", () => {
     saveGameLog(makeLog({ won: true }));
     saveGameLog(makeLog({ won: true }));
     saveGameLog(makeLog({ won: false }));
-    expect(gameLogsSummary(loadGameLogs())).toBe("3 games logged, 2W-1L");
+    expect(gameLogsSummary(loadGameLogs())).toBe("3 completed, 2W-1L");
     expect(gameLogsSummary([])).toBeNull();
   });
+  it("keeps incomplete captures separate from completed losses", () => {
+    const logs = [makeLog({ won: false, winner: "Ava", complete: true }),
+      makeLog({ won: false, winner: "Ava", complete: false }), makeLog({ won: false, winner: null })];
+    expect(gameLogsSummary(logs)).toBe("1 completed, 0W-1L, 2 incomplete");
+  });
+
 });

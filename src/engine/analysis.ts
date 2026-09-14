@@ -99,7 +99,7 @@ export function scoreVertex(
   if (resources.length >= 3) notes.push("3-resource diversity");
 
   // Number-token diversity: hexes sharing a token pay out together or not at
-  // all (streaky income), and ONE robber placement blocks all of them. Penalize
+  // all (streaky income). A robber only blocks ONE hex. Penalize
   // duplicated tokens by the pips of all but the biggest hex on that token.
   let dupPips = 0;
   for (const shares of pipsByToken.values()) {
@@ -114,13 +114,9 @@ export function scoreVertex(
   }
 
   if (v.port) {
-    // Ports ARE the trade economy in 1v1 (no player trades): game logs show
-    // 9–20 bank trades per game, almost all at 4:1. A 2:1 port fed by this
-    // corner's own production halves that cost forever, so it scores like
-    // extra pips rather than a token bonus.
+    // Port ownership alone creates no resources. Its usable trade savings
+    // are evaluated with our hand, production, and remaining game horizon.
     const feed = v.port.ratio === 2 ? (pipsByKind[v.port.kind as Resource] ?? 0) : 0;
-    const bonus = v.port.ratio === 2 ? 2.5 + feed * 0.4 : 1.5;
-    score += bonus;
     notes.push(
       v.port.ratio === 2
         ? `2:1 ${v.port.kind} port${feed > 0 ? ` fed by ${feed} pips here` : ""}`

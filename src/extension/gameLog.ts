@@ -8,6 +8,12 @@
  * reloads), a one-click JSON export, and — when the local bridge is running —
  * appended to .context/game-logs.jsonl on disk automatically.
  */
+import type { GameEvent } from "./events";
+import type { AutopilotDecision } from "./autopilot";
+import type { Hand } from "../engine/winnability";
+import type { TrackingHealth } from "./handLedger";
+import type { WireBuilding, WireRoad } from "./stateBridge";
+
 export interface GameLogMove {
   t: number;
   player: string | null;
@@ -42,6 +48,17 @@ export interface GameLogBuilding {
 }
 
 export interface GameLog {
+  complete?: boolean;
+  events?: Array<{ id: number; event: GameEvent }>;
+  decisions?: Array<{ t: number; eventIndex: number; decision: AutopilotDecision;
+    outcome?: { confirmed: boolean; resource?: import("../engine/types").Resource; cards?: number; eventId: number };
+    hands: Array<{ name: string; hand: Hand; total: number | null; health: TrackingHealth; publicVp: number }>;
+    buildings: WireBuilding[]; roads: WireRoad[];
+    position?: Omit<import("../engine/types").GameState, "board">;
+    planningInputs?: import("../engine/winnability").PlayerVictoryInput[];
+    devCardIds?: number[]; bankDevCards?: number | null;
+    robberHex?: { x: number; y: number } | null }>;
+  boardGeometry?: import("../engine/types").Board;
   version: string; // bot build that played this game
   at: string; // ISO end time
   durationMs: number | null;
@@ -78,7 +95,11 @@ export function saveGameLog(log: GameLog): void {
   try {
     const all = loadGameLogs();
     all.push(log);
-    localStorage.setItem(KEY, JSON.stringify(all.slice(-MAX_LOGS)));
+    const retained = all.slice(-MAX_LOGS);
+    while (retained.length) {
+      try { localStorage.setItem(KEY, JSON.stringify(retained)); break; }
+      catch { if (retained.length === 1) throw new Error("Game log exceeds storage quota"); retained.shift(); }
+    }
   } catch {
     // storage full/unavailable — the export button + bridge still capture it
   }
@@ -86,6 +107,8 @@ export function saveGameLog(log: GameLog): void {
 
 export function gameLogsSummary(logs: GameLog[]): string | null {
   if (logs.length === 0) return null;
-  const wins = logs.filter((l) => l.won).length;
-  return `${logs.length} game${logs.length > 1 ? "s" : ""} logged, ${wins}W-${logs.length - wins}L`;
+  const completed = logs.filter((l) => l.complete !== false && l.winner !== null);
+  const wins = completed.filter((l) => l.won).length;
+  const incomplete = logs.length - completed.length;
+  return `${completed.length} completed, ${wins}W-${completed.length - wins}L${incomplete ? `, ${incomplete} incomplete` : ""}`;
 }

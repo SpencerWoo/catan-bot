@@ -432,10 +432,12 @@ export function planDiscard(
   hand: Record<Resource, number>,
   count: number,
   fit: LiveStrategyFit | null | undefined,
+  reserve?: Partial<Record<Resource, number>>,
+  weights?: Record<Resource, number>,
 ): Partial<Record<Resource, number>> {
-  const keep: Partial<Record<Resource, number>> = fit
+  const keep: Partial<Record<Resource, number>> = reserve ?? (fit
     ? { ...BUILD_COSTS[fit.strategy.buildOrder[0]] }
-    : {};
+    : {});
   const pool = { ...hand };
   const out: Partial<Record<Resource, number>> = {};
   for (let i = 0; i < count; i++) {
@@ -444,7 +446,7 @@ export function planDiscard(
     const pick = avail.sort(
       (a, b) =>
         pool[b] - (keep[b] ?? 0) - (pool[a] - (keep[a] ?? 0)) ||
-        (fit ? fit.strategy.weights[a] - fit.strategy.weights[b] : 0),
+        (weights ? weights[a] - weights[b] : fit ? fit.strategy.weights[a] - fit.strategy.weights[b] : 0),
     )[0];
     pool[pick]--;
     out[pick] = (out[pick] ?? 0) + 1;

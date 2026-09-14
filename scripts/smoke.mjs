@@ -14,6 +14,7 @@ const dom = new JSDOM(
   { runScripts: "outside-only", pretendToBeVisual: true, url: "https://colonist.io/" },
 );
 const { window } = dom;
+window.structuredClone = structuredClone;
 // Simulate a stopped local bridge: rejected fetches must not stop the overlay.
 let bridgeAttempts = 0;
 window.fetch = async () => {
@@ -67,13 +68,23 @@ await sleep(700); // debounce is 400ms
 
 overlay = window.document.getElementById("catan-copilot");
 const text = overlay.textContent;
+const before = (a, b) => a.compareDocumentPosition(b) & window.Node.DOCUMENT_POSITION_FOLLOWING;
+const heading = (text) => [...overlay.querySelectorAll("h4")].find((h) => h.textContent.startsWith(text));
 const checks = [
+  ["panel order: checkbox, board, cards, dice, evaluation, strategy, Rush, history",
+    before(overlay.querySelector('[data-act="toggle-autopilot"]'), overlay.querySelector("svg")) &&
+    before(overlay.querySelector("svg"), heading("Players")) &&
+    before(heading("Players"), heading("Balanced-dice")) &&
+    before(heading("Balanced-dice"), heading("Remaining game")) &&
+    before(heading("Remaining game"), heading("Plan to finish")) &&
+    before(heading("Plan to finish"), overlay.querySelector('[data-act="rush-pref"]')) &&
+    before(overlay.querySelector('[data-act="rush-pref"]'), heading("Move history"))],
   ["overlay survives rejected bridge requests", bridgeAttempts > 0],
   ["board captured from real protocol", overlay.querySelectorAll("svg polygon").length === 19],
   ["players from roster", text.includes("LadyboyNick") && text.includes("Sera")],
   ["you-detection", text.includes("(you)")],
-  ["strategy section", text.includes("Your strategy")],
-  ["recommendation", text.includes("RECOMMENDED")],
+  ["shared race horizon", text.includes("Remaining game (estimate)")],
+  ["continuous production valuation", text.includes("Production investments are valued over that horizon")],
   ["balanced-dice deck", text.includes("Balanced-dice deck")],
   ["deck counting (an 8 and a 6 drawn: 34 left)", text.includes("34 cards left")],
   ["placement heading", text.includes("here") || text.includes("Expand") || text.includes("Best open spots")],

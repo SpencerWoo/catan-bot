@@ -1,3 +1,5 @@
+import { PlanningContext, planningAdvice } from "./planning";
+import { bestRobberHex } from "./autopilot";
 import { RESOURCES, Resource } from "../engine/types";
 import {
   DeckStatus,
@@ -18,12 +20,11 @@ import { TrackerState, handTotal, visibleVp } from "./tracker";
 import {
   PlacementAdvice,
   advisePlacement,
-  colonistIdForColor,
   placementFacts,
   renderMiniMap,
 } from "./placement";
 import { Board, GameState, PlayerId } from "../engine/types";
-import { AutopilotView, estimateWinProbability, opponentStarveResource, riskModeOf } from "./autopilot";
+import { AutopilotView, estimateWinProbability } from "./autopilot";
 import { RushView } from "./rush/rushPilot";
 import { VictoryPlan } from "../engine/winnability";
 import { RushPref } from "./rush/rushMode";
@@ -258,6 +259,7 @@ export interface OverlayHooks {
   onToggleAutopilot?: (on: boolean) => void;
   /** per-player win chance + path to victory */
   getWinChances?: () => VictoryPlan[];
+  getPlanning?: () => PlanningContext | null;
   /** Rush mode (no turns): pilot state + how it was decided */
   getRushView?: () => RushView & { active: boolean; pref: RushPref; modeSetting: number | null };
   onSetRushPref?: (pref: RushPref) => void;
@@ -485,9 +487,11 @@ export class Overlay {
     let advice: PlacementAdvice | null = null;
     if (bridge?.board) {
       gs = bridge.toGameState();
-      if (gs) advice = advisePlacement(gs.state, gs.youPlayer);
+      if (gs) advice = advisePlacement(gs.state, gs.youPlayer, state.players.size);
     }
 
+    const planning = this.hooks.getPlanning?.() ?? null;
+    if (planning && gs && advice) advice = planningAdvice(advice, planning, gs.state);
     const you = state.youName;
     const fits =
       you && state.players.has(you)
@@ -496,7 +500,7 @@ export class Overlay {
 
     // Position eval (chess-style): who is ahead and why, recomputed every turn.
     const evalHtml = this.renderEval(state, bridge ?? null);
-    if (evalHtml) parts.push(evalHtml);
+    let moveHtml = "";
 
     if (you && fits.length > 0) {
       let facts: PlacementFacts | null = null;
@@ -509,22 +513,31 @@ export class Overlay {
       // quiet rather than wrong.
       const inSetup = advice?.phase === "setup" || state.rolls.length === 0;
       if (!inSetup) {
-        parts.push(this.renderYourMove(nextMoves(state, you, fits[0], facts)));
+        const top = planning?.builds[0];
+        moveHtml = this.renderYourMove(top ? [{ primary: true,
+          text: `${top.wait === 0 ? "Fund" : "Save for"} ${top.kind}${top.vertexId !== undefined ? ` at intersection ${top.vertexId}` : ""} — ~${top.wait.toFixed(1)} turns to fund; race horizon ~${planning!.horizon.turns.toFixed(1)} turns.` }] : nextMoves(state, you, fits[0], facts));
       }
     }
 
     parts.push(this.renderWhereToBuild(bridge ?? null, gs, advice));
-    parts.push(this.renderDeck(deckStatus(state), state));
+    if (moveHtml) parts.push(moveHtml);
     parts.push(this.renderPlayers(state));
+    parts.push(this.renderDeck(deckStatus(state), state));
+    if (evalHtml) parts.push(evalHtml);
     parts.push(this.renderWinChances());
 
     if (you && fits.length > 0) {
-      parts.push(this.renderStrategies(fits));
-      const robber = robberAdvice(state);
+      if (planning) {
+        const mine = planning.victories.find((p) => p.isYou);
+        parts.push(`<h4>Plan to finish</h4><p class="cc-note">${esc(mine?.summary ?? "Building production while a route opens")}</p>`);
+      } else parts.push(this.renderStrategies(fits));
+      const tile = planning && gs && gs.youPlayer !== null ? bestRobberHex(gs.state, gs.youPlayer, bridge?.robberHex ?? null,
+        undefined, undefined, undefined, planning) : null;
+      const robber = tile ? { reason: tile.describe } : robberAdvice(state);
       if (robber) {
         parts.push(`<h4>Robber</h4><p class="cc-note">${esc(robber.reason)}</p>`);
       }
-      const tips = tradeTips(state, you, fits[0]);
+      const tips = planning ? [] : tradeTips(state, you, fits[0]);
       if (tips.length) parts.push(this.renderTrades(tips, isOneVsOne(state)));
     } else {
       parts.push(
@@ -532,17 +545,15 @@ export class Overlay {
       );
     }
     if (state.gameOver) {
-      parts.unshift(`<p class="cc-note"><strong>${esc(state.gameOver)}</strong> won the game.</p>`);
+      parts.push(`<p class="cc-note"><strong>${esc(state.gameOver)}</strong> won the game.</p>`);
     }
     if (this.hooks.needsRefresh?.()) {
-      parts.unshift(
+      parts.push(
         `<p class="cc-note" style="color:var(--brick);font-weight:600">⟳ Reload this tab! The game socket isn't captured — exact hands, the board map and full autopilot need it. (Colonist resends everything on refresh.)</p>`,
       );
     }
 
-    parts.push(this.renderHistory());
-    // Autopilot goes at the TOP (below any reload/game-over notice): the
-    // play-for-me switch is the most-used control.
+    parts.push(this.renderRush(), this.renderHistory(), this.renderAfterGame());
     parts.unshift(this.renderAutopilot());
     this.body.innerHTML = parts.join("");
   }
@@ -570,15 +581,19 @@ export class Overlay {
   private renderAutopilot(): string {
     const ap = this.hooks.getAutopilotView?.();
     if (!ap) return "";
-    const captured = this.hooks.captureCount?.() ?? 0;
     return `
       <h4>Autopilot</h4>
       <p class="cc-note">
         <label><input type="checkbox" data-act="toggle-autopilot" ${ap.enabled ? "checked" : ""}/>
         <strong>Play my turns</strong></label>
         <span class="cc-muted"> — ${esc(ap.note)}</span>
-      </p>
-      ${this.renderRush()}
+      </p>`;
+  }
+
+  private renderAfterGame(): string {
+    if (!this.hooks.getAutopilotView?.()) return "";
+    const captured = this.hooks.captureCount?.() ?? 0;
+    return `
       <p class="cc-note cc-muted">Plays your turn through colonist's own protocol: rolls, builds
       settlements, roads and cities (setup and mid-game), buys dev cards, bank-trades toward builds,
       plays knights and monopolies, moves the robber and steals, discards on a 7, ends the turn.
@@ -614,7 +629,6 @@ export class Overlay {
   private renderRecord(): string {
     const st = recordStats(loadRecords());
     if (!st) return "";
-    const pct = (x: number) => `${Math.round(x * 100)}%`;
     const tile = (v: string, k: string, cls = "") =>
       `<div class="cc-tile ${cls}"><div class="v">${v}</div><div class="k">${k}</div></div>`;
     const form = st.recent
@@ -622,6 +636,7 @@ export class Overlay {
       .join("");
     const streak =
       st.streak >= 2 ? `${st.streak} wins in a row` : st.streak <= -2 ? `${-st.streak} losses in a row` : "";
+    const pct = (x: number) => `${Math.round(x * 100)}%`;
     const split = (label: string, rows: Array<{ name: string; games: number; wins: number; winRate: number }>) =>
       rows.length < 1
         ? ""
@@ -678,6 +693,8 @@ export class Overlay {
     const you = state.players.get(state.youName);
     const opponents = [...state.players.values()].filter((p) => p.name !== state.youName);
     if (!you || opponents.length === 0) return "";
+    const planning = this.hooks.getPlanning?.();
+    if (planning) return `<h4>Remaining game (estimate)</h4><p class="cc-note">~${planning.horizon.turns.toFixed(1)} own turns before the first projected finish. Production investments are valued over that horizon.</p>`;
     const opp = opponents.reduce((a, b) => (visibleVp(b) > visibleVp(a) ? b : a), opponents[0]);
     let gs: { state: GameState; youPlayer: PlayerId | null } | null = null;
     try {
@@ -697,24 +714,8 @@ export class Overlay {
     const pct = Math.round(Math.min(0.95, Math.max(0.05, wp.probability)) * 100);
     const sign = wp.probability >= 0.5 ? "+" : "−";
     const ev = (Math.abs(wp.probability - 0.5) * 2).toFixed(1);
-    const mode = riskModeOf(wp.probability);
-    const verdict =
-      mode === "protect"
-        ? "You're ahead — protecting the lead"
-        : mode === "lotto"
-          ? "You're behind — playing for variance"
-          : "Even game";
+    const verdict = "Race estimate unavailable — showing observed position only";
     const drivers = [...wp.reasoning];
-    if (mode === "lotto") drivers.push("Behind: dev cards stay in the plan — each is a comeback ticket.");
-    if (mode === "protect") drivers.push("Ahead: hands dump 3 cards before the limit so a 7 can't bite.");
-    const starve = ((): string | null => {
-      if (!gs || gs.youPlayer === null || !opp) return null;
-      const oppId = opp.playerId ?? colonistIdForColor(opp.color);
-      if (oppId === null) return null;
-      const r = opponentStarveResource(gs.state, oppId as PlayerId);
-      return r ? `They're thinnest on ${r} — robber on ${r} tiles hurts them most.` : null;
-    })();
-    if (starve) drivers.push(starve);
     const driverHtml = drivers
       .slice(0, 4)
       .map((r) => `<li>${esc(r)}</li>`)
@@ -788,18 +789,17 @@ export class Overlay {
       ${hitLine}${dueLine}`;
   }
 
-  /** Win chance + path-to-victory per player (heuristic estimate). */
+  /** Completion forecast; the heuristic is not a calibrated win probability. */
   private renderWinChances(): string {
     const plans = this.hooks.getWinChances?.() ?? [];
     if (plans.length === 0) return "";
-    const pct = (x: number) => `${Math.round(x * 100)}%`;
     const target = plans[0].target;
     const rows = plans
       .map((p) => {
         const cls = p.eliminated ? "out" : p.isYou ? "you" : "";
-        const bar = p.eliminated
-          ? `<div class="cc-wbar"><em>out</em></div>`
-          : `<div class="cc-wbar"><span style="width:${pct(p.winProb)}"></span><em>${pct(p.winProb)}</em></div>`;
+        const bar = p.eliminated || !Number.isFinite(p.turnsToWin)
+          ? `<span class="cc-muted">No verified route</span>`
+          : `<strong>~${p.turnsToWin.toFixed(1)} own turns</strong>`;
         const needBits = RESOURCES.filter((r) => (p.need[r] ?? 0) > 0).map((r) => `${p.need[r]} ${r}`);
         const need = needBits.length ? ` <span class="cc-muted">· need ${esc(needBits.join(", "))}</span>` : "";
         const tag = p.largestArmyReachable ? "" : "";
@@ -813,7 +813,8 @@ export class Overlay {
       })
       .join("");
     return `
-      <h4>Win chance <span class="cc-muted">(estimate)</span></h4>
+      <h4>Race forecast <span class="cc-muted">(expected production)</span></h4>
+      <p class="cc-note">Planning estimate, not win odds. Dice variation, hidden cards and incomplete hand tracking can change the race.</p>
       <table class="cc-wtable">${rows}</table>`;
   }
 
@@ -837,13 +838,14 @@ export class Overlay {
           <tr>
             <td><span class="dot" style="background:${esc(p.color)}"></span>${esc(p.name)}${state.youName === p.name ? " <span class='cc-muted'>(you)</span>" : ""}</td>
             <td>${visibleVp(p)}</td>
-            <td title="known hand">${cards}</td>
+            <td title="${esc(p.trackingReason ?? p.trackingHealth ?? "unverified hand")}">${cards}${p.name !== state.youName ? ` <small>${esc(p.trackingHealth ?? "unverified")}</small>` : ""}</td>
             <td>${prodPips}</td>
             <td>${p.devCards}/${p.knightsPlayed}</td>
           </tr>
           <tr><td colspan="5" style="text-align:left;padding-left:18px"><div class="cc-hand">${hand}</div></td></tr>`;
       });
-    const mode = isOneVsOne(state) ? ` <span class="cc-muted">(1v1 — first to 15 VP)</span>` : "";
+    const target = this.hooks.getPlanning?.()?.victories[0]?.target;
+    const mode = isOneVsOne(state) ? ` <span class="cc-muted">(1v1${target ? ` — first to ${target} VP` : ""})</span>` : "";
     return `
       <h4>Players${mode}</h4>
       <table>
