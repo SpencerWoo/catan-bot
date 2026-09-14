@@ -2104,6 +2104,34 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
     }
     return actions;
   }
+  function bonusTiming(players, plans, target, kind, playKnight = false) {
+    var _a;
+    const me = players.find((p) => p.isYou);
+    if (!me) return null;
+    const army = kind === "largest-army";
+    const held = army ? "holdsLargestArmy" : "holdsLongestRoad";
+    if (me[held]) return null;
+    const plan = plans.find((p) => p.isYou);
+    const count = army ? Math.max(3, 1 + Math.max(0, ...players.map((p) => p.knightsPlayed))) - me.knightsPlayed : ((_a = me.longestRoadPath) == null ? void 0 : _a.length) ?? Infinity;
+    if (count <= 0 || !Number.isFinite(count) || !army && count > (me.roadsLeft ?? 0)) return null;
+    const rate = Object.fromEntries(RESOURCES.map((r) => [r, me.production[r] * (me.rollsPerTurn ?? 2)]));
+    const purchases = army ? Math.max(0, count - (me.knightsInHand ?? 0)) / (14 / 25) : count;
+    const unit = army ? BUILD.dev : BUILD.road;
+    const cost = Object.fromEntries(RESOURCES.map((r) => [r, (unit[r] ?? 0) * purchases]));
+    const financing = turnsToAfford(cost, me.hand, rate, me.bankRatios);
+    const plays = army ? Math.max(0, count - ((me.playableKnights ?? 0) > 0 ? 1 : 0)) : 0;
+    const lead = playKnight ? plays : financing + plays;
+    if (!Number.isFinite(lead)) return null;
+    const label = army ? "Largest Army" : "Longest Road";
+    const denial = players.some((p) => !p.isYou && p[held] && plans.some((v) => v.name === p.name && v.turnsToWin <= 1 && p.publicVp + (p.hiddenVp ?? 0) - 2 + v.planVp < target));
+    if (denial && financing + plays <= 1e-6) return `deny an imminent win by taking ${label}`;
+    if (!(plan == null ? void 0 : plan.steps.some((s) => s.kind === kind))) return null;
+    if (target - me.publicVp - (me.hiddenVp ?? 0) <= 2) return `prepare ${label} to reach the victory threshold`;
+    const deadline = sequenceTime(plan.steps.filter((s) => s.kind !== kind), me);
+    if (Number.isFinite(deadline) && deadline < lead + 1 - 1e-6)
+      return `prepare ${label} now to meet the winning plan's deadline`;
+    return null;
+  }
   const zeroHand = () => ({ wood: 0, brick: 0, sheep: 0, wheat: 0, ore: 0 });
   function planningAdvice(advice, planning, state) {
     var _a, _b, _c;
@@ -2271,9 +2299,11 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
           ratios
         });
       }
-      if (((_a = me.longestRoadPath) == null ? void 0 : _a.length) && !me.holdsLongestRoad) options.push({
+      const roadReason = bonusTiming(inputs, victories, target, "longest-road");
+      if (((_a = me.longestRoadPath) == null ? void 0 : _a.length) && roadReason) options.push({
         kind: "road",
         vp: 2,
+        deniesWin: roadReason.startsWith("deny"),
         cost: { wood: me.longestRoadPath.length, brick: me.longestRoadPath.length },
         production: zeroHand(),
         roadEdges: me.longestRoadPath
@@ -2290,7 +2320,7 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
     if (opts.devDeckLeft !== 0) {
       const leader = Math.max(2, ...inputs.map((p) => p.knightsPlayed));
       const needed = Math.max(1, leader + 1 - me.knightsPlayed - (me.knightsInHand ?? 0));
-      const armyValue = me.holdsLargestArmy ? 0 : 14 / 25 * 2 / needed * horizon.turns / (horizon.turns + needed);
+      const armyValue = bonusTiming(inputs, victories, target, "largest-army") ? 14 / 25 * 2 / needed * horizon.turns / (horizon.turns + needed) : 0;
       const unblocking = zeroHand();
       if (opts.robberHex && gs && gs.youPlayer !== null && !opts.knightsInHand) {
         const hex = gs.state.board.hexes.find((h) => h.q === opts.robberHex.x && h.r === opts.robberHex.y);
@@ -3090,10 +3120,13 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
         )
       );
       if (blockedMine) return "the robber is on your tile";
-      const me = planning.inputs.find((p) => p.isYou);
-      const armyStep = (_a2 = planning.victories.find((p) => p.isYou)) == null ? void 0 : _a2.steps.find((s) => s.kind === "largest-army");
-      if (!(me == null ? void 0 : me.holdsLargestArmy) && armyStep) return "advance the planned Largest Army route before its play deadline";
-      return null;
+      return bonusTiming(
+        planning.inputs,
+        planning.victories,
+        ((_a2 = planning.victories.find((p) => p.isYou)) == null ? void 0 : _a2.target) ?? opts.winTarget ?? 10,
+        "largest-army",
+        true
+      );
     })();
     const overLimit = handSize > limit;
     if (knightReason && !rolledThisTurn && !overLimit) {
@@ -3147,6 +3180,10 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
       return allowed(kind) ? { kind, coord, describe: `${choice.kind} — best progress within ~${planning.horizon.turns.toFixed(1)} turns` } : null;
     };
     for (const choice of choices.filter((b) => b.kind !== "dev" && b.vp >= planning.gap && b.wait === 0)) {
+      const action = build(choice);
+      if (action) return finish(action);
+    }
+    for (const choice of choices.filter((b) => b.deniesWin && b.wait === 0)) {
       const action = build(choice);
       if (action) return finish(action);
     }
@@ -3561,7 +3598,7 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
       byPlayers
     };
   }
-  const VERSION = "v1.20 legal-trades-race";
+  const VERSION = "v1.21 bonus-timing";
   const CSS = `
 #catan-copilot {
   --surface: #fcfcfb; --ink: #0b0b0b; --ink-2: #52514e; --ink-3: #898781;

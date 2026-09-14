@@ -48,6 +48,8 @@ export interface BuildOption {
   roadEdges?: number[];
   ratios?: Cost;
   delay?: number;
+  /** Taking this bonus delays the current holder's imminent finish. */
+  deniesWin?: boolean;
 }
 export interface BuildEvaluation extends BuildOption {
   wait: number;

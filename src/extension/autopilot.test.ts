@@ -410,7 +410,7 @@ describe("risk profile and opponent weakness", () => {
     expect(t?.describe).toContain("starving");
   });
 
-  it("buys an affordable dev when the city is genuinely distant, even with a large VP gap", async () => {
+  it("saves for growth instead of crediting an early speculative army", async () => {
     const { riskModeOf } = await import("./autopilot");
     expect(riskModeOf(0.2)).toBe("lotto");
     const t = trackerWith({ sheep: 1, wheat: 1, ore: 1 }, false);
@@ -435,7 +435,7 @@ describe("risk profile and opponent weakness", () => {
     const d = decideNext({
       tracker: t, youName: "Nick", fit, gs, advice: null, rolledThisTurn: true,
     });
-    expect(d?.kind).toBe("buy-dev");
+    expect(d?.kind).toBe("end-turn");
   });
 
 
@@ -493,9 +493,10 @@ describe("autopilot decisions", () => {
     expect(bestPlaceableNow(gs.state, 0)).toBeNull();
   });
 
-  it("buys a dev card in the late (dev-focus) phase", () => {
+  it("buys a dev toward the final knight needed for victory", () => {
     const t = trackerWith({ ore: 1, sheep: 1, wheat: 1 });
-    t.players.get("Nick")!.serverVp = 8; // past the growth phase -> follow the plan
+    t.players.get("Nick")!.serverVp = 8;
+    t.players.get("Nick")!.knightsPlayed = 2; // next knight can supply the winning bonus
     const fits = rankLiveStrategies(t, "Nick");
     const cityDev = fits.find((f) => f.strategy.id === "city-dev")!;
     const d = decideNext({
@@ -595,7 +596,7 @@ describe("autopilot decisions", () => {
     expect(d?.kind).toBe("end-turn"); // nothing else affordable/reachable
   });
 
-  it("advances a planned army before the final two points", () => {
+  it("holds an early knight even when army appears in the eventual plan", () => {
     const t = trackerWith({}); // ~3 cards, under the limit
     t.players.get("Nick")!.knightsPlayed = 2;
     const fits = rankLiveStrategies(t, "Nick");
@@ -610,8 +611,7 @@ describe("autopilot decisions", () => {
       knightAvailable: true,
       robberHex: { x: 99, y: 99 }, // robber on nobody
     });
-    expect(d?.kind).toBe("play-knight");
-    expect(d?.describe).toContain("planned Largest Army");
+    expect(d?.kind).toBe("roll");
   });
 
 
@@ -1423,7 +1423,7 @@ describe("autopilot decisions", () => {
 
 
 
-  it("plays a held knight for a planned army, independently of generic dev-card count", () => {
+  it("does not let generic dev-card count trigger early army chasing", () => {
     const t = trackerWith({});
     applyEvent(t, { type: "place", player: "Ava", color: "#E27174", what: "settlement" });
     const you = t.players.get("Nick")!;
@@ -1441,8 +1441,7 @@ describe("autopilot decisions", () => {
       knightAvailable: true,
     };
     const d = decideNext({ ...base, fit: fits[0] });
-    expect(d?.kind).toBe("play-knight");
-    expect(d?.describe).toMatch(/planned Largest Army/i);
+    expect(d?.kind).not.toBe("play-knight");
   });
 
 

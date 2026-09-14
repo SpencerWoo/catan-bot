@@ -122,8 +122,21 @@ it("takes only the necessary connected roads and respects the finite supply", as
   expect(roadBonusPath(state, 0, 7, 1)).toBeNull();
   expect(roadBonusPath(state, 0, 4, 15)).toEqual([]);
   const t = players();
+  state.buildings.push({ player: 0, vertexId: 0, kind: "settlement" });
   const gs = { state, youPlayer: 0 as const };
   const inputs = planPosition(t, 'Us', gs).inputs;
-  inputs.find(p => p.isYou)!.holdsLongestRoad = true;
+  const me = inputs.find(p => p.isYou)!;
+  me.longestRoadPath = path;
+  me.hand = t.players.get('Us')!.hand = { ...zeroHand(), wood: 1, brick: 1 };
+  const early = planPosition(t, 'Us', gs, { inputs });
+  expect(early.options.some(b => b.kind === 'road')).toBe(false);
+  expect(early.options.some(b => b.kind === 'settlement' && b.roadEdges?.length)).toBe(true);
+  expect(early.options.find(b => b.kind === 'dev')!.vp).toBe(0.2);
+  me.publicVp = 8;
+  const late = planPosition(t, 'Us', gs, { inputs });
+  expect(late.builds[0].kind).toBe('road');
+  expect(decideNext({ tracker: t, youName: 'Us', fit: rankLiveStrategies(t, 'Us')[0], gs,
+    advice: null, rolledThisTurn: true, planning: late })?.kind).toBe('build-road');
+  me.holdsLongestRoad = true;
   expect(planPosition(t, 'Us', gs, { inputs }).builds.some(b => b.kind === 'road')).toBe(false);
 });

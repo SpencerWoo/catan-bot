@@ -5,6 +5,7 @@ import { BuildEvaluation, BuildOption, evaluateBuilds, gameHorizon, Horizon } fr
 import { roadPathTo, PlacementAdvice, describeVertex } from "./placement";
 import { expectedProduction, deckStatus, planDiscard } from "./copilot";
 import { TrackerState, visibleVp } from "./tracker";
+import { bonusTiming } from "../engine/bonusTiming";
 
 export interface PlanningContext {
   horizon: Horizon;
@@ -176,7 +177,9 @@ export function planPosition(tracker: TrackerState, youName: string,
         cost: { wood: 1 + route.edges.length, brick: 1 + route.edges.length, wheat: 1, sheep: 1 },
         production: vertexIncome(gs.state, route.vertexId, rolls), vertexId: route.vertexId, roadEdges: route.edges, ratios });
     }
-    if (me.longestRoadPath?.length && !me.holdsLongestRoad) options.push({ kind: "road", vp: 2,
+    const roadReason = bonusTiming(inputs, victories, target, "longest-road");
+    if (me.longestRoadPath?.length && roadReason) options.push({ kind: "road", vp: 2,
+      deniesWin: roadReason.startsWith("deny"),
       cost: { wood: me.longestRoadPath.length, brick: me.longestRoadPath.length }, production: zeroHand(), roadEdges: me.longestRoadPath });
   }
   if (!gs && me.settlementsOnBoard > 0 && (me.citiesLeft ?? 0) > 0) {
@@ -186,7 +189,8 @@ export function planPosition(tracker: TrackerState, youName: string,
   if (opts.devDeckLeft !== 0) {
     const leader = Math.max(2, ...inputs.map((p) => p.knightsPlayed));
     const needed = Math.max(1, leader + 1 - me.knightsPlayed - (me.knightsInHand ?? 0));
-    const armyValue = me.holdsLargestArmy ? 0 : (14 / 25) * 2 / needed * horizon.turns / (horizon.turns + needed);
+    const armyValue = bonusTiming(inputs, victories, target, "largest-army")
+      ? (14 / 25) * 2 / needed * horizon.turns / (horizon.turns + needed) : 0;
     const unblocking = zeroHand();
     if (opts.robberHex && gs && gs.youPlayer !== null && !opts.knightsInHand) {
       const hex = gs.state.board.hexes.find((h) => h.q === opts.robberHex!.x && h.r === opts.robberHex!.y);

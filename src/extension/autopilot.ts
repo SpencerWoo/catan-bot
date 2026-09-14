@@ -2,6 +2,7 @@ import { GameState, PlayerId, RESOURCES, Resource, pips } from "../engine/types"
 import { vertexPips } from "../engine/board";
 import { evaluateBuilds, turnsToAfford, BuildEvaluation } from "../engine/horizon";
 import { PlanningContext, planPosition } from "./planning";
+import { bonusTiming } from "../engine/bonusTiming";
 import { confirmedMonopolyHaul } from "./handLedger";
 import { distanceFromPlayer, isVertexBuildable, playerProduction } from "../engine/analysis";
 import { pixelToColonistCorner, pixelsToColonistEdge } from "./coords";
@@ -712,10 +713,8 @@ export function decideNext(opts: {
       );
     if (blockedMine) return "the robber is on your tile";
 
-    const me = planning.inputs.find((p) => p.isYou);
-    const armyStep = planning.victories.find((p) => p.isYou)?.steps.find((s) => s.kind === "largest-army");
-    if (!me?.holdsLargestArmy && armyStep) return "advance the planned Largest Army route before its play deadline";
-    return null;
+    return bonusTiming(planning.inputs, planning.victories,
+      planning.victories.find(p => p.isYou)?.target ?? opts.winTarget ?? 10, "largest-army", true);
   })();
 
   // Knight timing: play it BEFORE rolling by default (move the robber / grow
@@ -778,6 +777,11 @@ export function decideNext(opts: {
 
   // An available win outranks spending a development card or a speculative trade.
   for (const choice of choices.filter((b) => b.kind !== "dev" && b.vp >= planning.gap && b.wait === 0)) {
+    const action = build(choice);
+    if (action) return finish(action);
+  }
+
+  for (const choice of choices.filter(b => b.deniesWin && b.wait === 0)) {
     const action = build(choice);
     if (action) return finish(action);
   }

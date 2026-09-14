@@ -1,5 +1,25 @@
 # Exact hands and the remaining game
 
+## v1.21: time bonuses for victory
+
+Largest Army and Longest Road remain in completion forecasts, but no longer
+automatically earn an early action reward. Bonus-only investment becomes useful
+when it closes the victory gap or waiting another turn would miss the projected
+finish of the rest of the winning plan. Financing and knight play limits determine
+the preparation time; a held knight uses its play schedule rather than the cost
+of future purchases to decide when to act.
+
+An immediately fundable takeover also qualifies when removing the holder's two
+points breaks their projected finish within one turn. Executable road takeovers
+take priority over ordinary investments, after an available win. Productive
+settlement routes and knights that unblock our production remain available early.
+An inactive army contributes no expected army points to a dev purchase.
+
+Regression coverage includes early bonus deferral, hidden VP and 15-point targets,
+knight deadlines, urgent versus distant holders, unfunded denial, legal expansion,
+and winning road construction. Timing remains an expected-income approximation;
+this change does not establish a win-rate improvement or change Year of Plenty.
+
 The bot now evaluates growth and point conversion against the earliest estimated finish by either player. There is no four-point phase switch, minimum Monopoly haul, automatic port ownership reward, or live “behind means buy dev cards” override.
 
 ## Evidence from retained games
