@@ -1,3 +1,5 @@
+import { PlanningContext, planningAdvice } from "./planning";
+import { bestRobberHex } from "./autopilot";
 import { RESOURCES, Resource } from "../engine/types";
 import {
   DeckStatus,
@@ -258,6 +260,7 @@ export interface OverlayHooks {
   onToggleAutopilot?: (on: boolean) => void;
   /** per-player win chance + path to victory */
   getWinChances?: () => VictoryPlan[];
+  getPlanning?: () => PlanningContext | null;
   /** Rush mode (no turns): pilot state + how it was decided */
   getRushView?: () => RushView & { active: boolean; pref: RushPref; modeSetting: number | null };
   onSetRushPref?: (pref: RushPref) => void;
@@ -485,9 +488,11 @@ export class Overlay {
     let advice: PlacementAdvice | null = null;
     if (bridge?.board) {
       gs = bridge.toGameState();
-      if (gs) advice = advisePlacement(gs.state, gs.youPlayer);
+      if (gs) advice = advisePlacement(gs.state, gs.youPlayer, state.players.size);
     }
 
+    const planning = this.hooks.getPlanning?.() ?? null;
+    if (planning && gs && advice) advice = planningAdvice(advice, planning, gs.state);
     const you = state.youName;
     const fits =
       you && state.players.has(you)
@@ -509,7 +514,9 @@ export class Overlay {
       // quiet rather than wrong.
       const inSetup = advice?.phase === "setup" || state.rolls.length === 0;
       if (!inSetup) {
-        parts.push(this.renderYourMove(nextMoves(state, you, fits[0], facts)));
+        const top = planning?.builds[0];
+        parts.push(this.renderYourMove(top ? [{ primary: true,
+          text: `${top.wait === 0 ? "Fund" : "Save for"} ${top.kind}${top.vertexId !== undefined ? ` at intersection ${top.vertexId}` : ""} — ~${top.wait.toFixed(1)} turns to fund; race horizon ~${planning!.horizon.turns.toFixed(1)} turns.` }] : nextMoves(state, you, fits[0], facts)));
       }
     }
 
@@ -519,12 +526,17 @@ export class Overlay {
     parts.push(this.renderWinChances());
 
     if (you && fits.length > 0) {
-      parts.push(this.renderStrategies(fits));
-      const robber = robberAdvice(state);
+      if (planning) {
+        const mine = planning.victories.find((p) => p.isYou);
+        parts.push(`<h4>Plan to finish</h4><p class="cc-note">${esc(mine?.summary ?? "Building production while a route opens")}</p>`);
+      } else parts.push(this.renderStrategies(fits));
+      const tile = planning && gs && gs.youPlayer !== null ? bestRobberHex(gs.state, gs.youPlayer, bridge?.robberHex ?? null,
+        undefined, undefined, undefined, planning) : null;
+      const robber = tile ? { reason: tile.describe } : robberAdvice(state);
       if (robber) {
         parts.push(`<h4>Robber</h4><p class="cc-note">${esc(robber.reason)}</p>`);
       }
-      const tips = tradeTips(state, you, fits[0]);
+      const tips = planning ? [] : tradeTips(state, you, fits[0]);
       if (tips.length) parts.push(this.renderTrades(tips, isOneVsOne(state)));
     } else {
       parts.push(
@@ -678,6 +690,8 @@ export class Overlay {
     const you = state.players.get(state.youName);
     const opponents = [...state.players.values()].filter((p) => p.name !== state.youName);
     if (!you || opponents.length === 0) return "";
+    const planning = this.hooks.getPlanning?.();
+    if (planning) return `<h4>Remaining game (estimate)</h4><p class="cc-note">~${planning.horizon.turns.toFixed(1)} own turns before the first projected finish. Production investments are valued over that horizon.</p>`;
     const opp = opponents.reduce((a, b) => (visibleVp(b) > visibleVp(a) ? b : a), opponents[0]);
     let gs: { state: GameState; youPlayer: PlayerId | null } | null = null;
     try {
@@ -837,7 +851,7 @@ export class Overlay {
           <tr>
             <td><span class="dot" style="background:${esc(p.color)}"></span>${esc(p.name)}${state.youName === p.name ? " <span class='cc-muted'>(you)</span>" : ""}</td>
             <td>${visibleVp(p)}</td>
-            <td title="known hand">${cards}</td>
+            <td title="${esc(p.trackingReason ?? p.trackingHealth ?? "unverified hand")}">${cards}${p.name !== state.youName ? ` <small>${esc(p.trackingHealth ?? "unverified")}</small>` : ""}</td>
             <td>${prodPips}</td>
             <td>${p.devCards}/${p.knightsPlayed}</td>
           </tr>

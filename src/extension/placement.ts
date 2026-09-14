@@ -1,3 +1,5 @@
+import { turnsToAfford } from "../engine/horizon";
+import { BUILD, Hand } from "../engine/winnability";
 import { hexCornerPoints, vertexPips } from "../engine/board";
 import {
   combineWeights,
@@ -180,7 +182,7 @@ export function placementWeights(board: Board): Record<Resource, number> {
  */
 // Cities are the 1v1 engine (3 ranked losses: 1-0-3 cities vs 3-2-4, all
 // ore-light) — value ore/wheat coverage above wood/brick, sheep least.
-const SETUP_NEED: Record<Resource, number> = { wheat: 1.3, ore: 1.35, wood: 0.95, brick: 0.95, sheep: 0.8 };
+const SETUP_NEED: Record<Resource, number> = { wheat: 1, ore: 1, wood: 1, brick: 1, sheep: 1 };
 
 /**
  * Opening-hand value of a payout (1 card per adjacent hex): early roads eat
@@ -241,15 +243,13 @@ export function rankSetupSpots(
         const more = add[r] ?? 0;
         utility += weights[r] * SETUP_NEED[r] * (Math.sqrt(have + more) - Math.sqrt(have));
       }
-      // keep the port signal from scoreVertex (it's the only non-pip term we want)
-      const portBonus = v.port ? (v.port.ratio === 2 ? 2.5 + (add[v.port.kind as Resource] ?? 0) * 0.4 : 1.5) : 0;
       const covers = RESOURCES.filter((r) => (add[r] ?? 0) > 0 && existing[r] === 0);
       // Hard coverage bonus (batch 3: zero brick production all game -> every
       // road/settlement cost a 4:1; 207 cards lost to the bank in 10 games).
       // The sqrt utility alone still let a 5-pip ore addition beat a first brick
       // pip. A core resource we'd otherwise never produce is worth ~2.5 pips.
       const coverageBonus = covers.reduce((acc, r) => acc + (r === "sheep" ? 1.0 : 2.5), 0);
-      let score = utility * 3 + portBonus + coverageBonus; // ×3 puts it on scoreVertex's pip-ish scale
+      let score = utility * 3 + base.pips * 0.5 + coverageBonus; // ×3 puts it on scoreVertex's pip-ish scale
       const notes = [...base.notes];
 
       // concentration check with this candidate merged into the network
@@ -272,10 +272,25 @@ export function rankSetupSpots(
         if (topShare > 0.55) {
           const penalty = (topShare - 0.55) * 12;
           score -= penalty;
-          notes.push(`robber-vulnerable: ${(topShare * 100).toFixed(0)}% of pips on the ${topToken}`);
+          notes.push(`correlated income: ${(topShare * 100).toFixed(0)}% of pips on the ${topToken}`);
         }
       }
 
+      // Shared HEX exposure is separate from shared-number variance.
+      const allHexPips = new Map<number, number>();
+      for (const b of state.buildings.filter((b) => b.player === youPlayer)) for (const hid of state.board.vertices[b.vertexId].hexIds) {
+        allHexPips.set(hid, (allHexPips.get(hid) ?? 0) + pips(state.board.hexes[hid].token));
+      }
+      let repeated = 0;
+      for (const hid of v.hexIds) if (allHexPips.has(hid)) repeated += pips(state.board.hexes[hid].token);
+      score -= repeated * 0.3;
+      if (haveBuildings) {
+        const rate = Object.fromEntries(RESOURCES.map((r) => [r, (existing[r] + (add[r] ?? 0) / 36) * 2])) as Hand;
+        const payout = startingResourcesFor(state, v.id);
+        const wait = Math.min(turnsToAfford(BUILD.city, payout, rate),
+          turnsToAfford({ wood: 2, brick: 2, sheep: 1, wheat: 1 }, payout, rate));
+        score += 3 / (1 + wait);
+      }
       if (covers.length && state.buildings.some((b) => b.player === youPlayer)) notes.push(`adds ${covers.join("+")} you lack`);
       return { ...base, score, notes };
     })
@@ -324,6 +339,7 @@ export function isContested(state: GameState, you: PlayerId, target: number, our
 export function advisePlacement(
   state: GameState,
   youPlayer: PlayerId | null,
+  playerCount = 2,
 ): PlacementAdvice | null {
   if (youPlayer === null) {
     // No self-identification yet: still useful during setup — show the best
@@ -375,23 +391,21 @@ export function advisePlacement(
     // opening payout first — the stronger payout lands on the paying pick.
     const mineCount = yourBuildings.length;
     const oppCount = state.buildings.length - mineCount;
-    if (mineCount === 0 && oppCount === 1) {
-      const pool = rankSetupSpots(state, youPlayer, base, 6);
+    if (playerCount === 2 && mineCount === 0 && oppCount === 1) {
+      const pool = rankSetupSpots(state, youPlayer, base, Infinity);
       let bestPair: { first: (typeof pool)[number]; second: (typeof pool)[number]; score: number } | null = null;
-      for (let i = 0; i < pool.length; i++) {
-        for (let j = i + 1; j < pool.length; j++) {
-          const combined = pool[i].score + pool[j].score;
-          if (!bestPair || combined > bestPair.score) {
-            bestPair = { first: pool[i], second: pool[j], score: combined };
-          }
+      for (const first of pool) {
+        const trial: GameState = { ...state, buildings: [...state.buildings,
+          { player: youPlayer, vertexId: first.vertexId, kind: "settlement" }] };
+        const seconds = rankSetupSpots(trial, youPlayer, base, Infinity);
+        for (const second of seconds) {
+          const combined = first.score + second.score;
+          if (!bestPair || combined > bestPair.score) bestPair = { first, second, score: combined };
         }
       }
       if (bestPair) {
-        const openFirst = openingValue(startingResourcesFor(state, bestPair.first.vertexId));
-        const openSecond = openingValue(startingResourcesFor(state, bestPair.second.vertexId));
-        const paysFirst = openFirst > openSecond; // the WEAKER payout goes first
-        const nowSpot = paysFirst ? bestPair.second : bestPair.first;
-        const paySpot = paysFirst ? bestPair.first : bestPair.second;
+        const nowSpot = bestPair.first;
+        const paySpot = bestPair.second;
         return {
           phase: "setup",
           heading: "You place TWICE in a row — plan the pair",
@@ -408,7 +422,7 @@ export function advisePlacement(
             },
           ],
           roadEdges: [],
-          note: "Going second, your two placements are back-to-back — nothing can be taken in between. Only the 2nd collects resources, so the weaker-opening corner goes first.",
+          note: "Going second, your two placements are back-to-back — nothing can be taken in between. Both spots are legal together; the second payout accelerates the first productive build.",
         };
       }
     }

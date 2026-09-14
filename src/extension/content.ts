@@ -1,3 +1,6 @@
+import { HandLedger, confirmedMonopolyHaul } from "./handLedger";
+import { PlanningContext, planPosition, settlementRoutes, roadBonusPath, planningAdvice, vertexIncome } from "./planning";
+import { playerProduction } from "../engine/analysis";
 import { parseLogRow } from "./logParser";
 import { GameEvent, ResourceDelta } from "./events";
 import { TrackerState, applyEvent, createTracker, ensurePlayer, reconcileHandWithTotal } from "./tracker";
@@ -7,7 +10,7 @@ import { COLONIST_COLORS, advisePlacement, describeVertex } from "./placement";
 import { ProtocolLearner } from "./protocolLearner";
 import { DISCARD_BANNER, MOVE_ROBBER_BANNER, YOUR_TURN_BANNER, rollPromptVisible } from "./domActions";
 import { Autopilot, AutopilotDecision, bestPlaceableNow, cardsToIds } from "./autopilot";
-import { analyzeVictory, PlayerVictoryInput, VictoryPlan } from "../engine/winnability";
+import { PlayerVictoryInput, VictoryPlan } from "../engine/winnability";
 import { RushPilot } from "./rush/rushPilot";
 import { RushPref, isRushMode, loadRushPref, saveRushPref } from "./rush/rushMode";
 import { deckStatus, expectedProduction, productionTotal, rankLiveStrategies } from "./copilot";
@@ -15,7 +18,7 @@ import { handTotal, visibleVp } from "./tracker";
 import { loadRecords, recordGameEnd, strategyPriors } from "./learning";
 import { GameLog, loadGameLogs, saveGameLog } from "./gameLog";
 import { VERSION } from "./version";
-import { RESOURCES, Resource } from "../engine/types";
+import { RESOURCES, Resource, PlayerId } from "../engine/types";
 import { vertexPips } from "../engine/board";
 import {
   bankTradeActions,
@@ -54,6 +57,7 @@ function dispatchDecision(d: AutopilotDecision, opts?: { setupPhase?: boolean })
   const mainGame = opts?.setupPhase !== undefined ? !opts.setupPhase : bridge.turnState === 2;
   const send = (actions: Array<{ action: number; payload: unknown }>): boolean => {
     if (actions.length === 0) return false;
+    recordDecision(d);
     window.postMessage({ [SEND_MARKER]: true, actions }, "*");
     return true;
   };
@@ -99,7 +103,8 @@ function dispatchDecision(d: AutopilotDecision, opts?: { setupPhase?: boolean })
       return send(bankTradeActions(bridge.myColor, giveId, d.trade.giveCount, getId));
     }
     case "play-monopoly": {
-      if (!d.resource) return false;
+      syncTrackerFromState();
+      if (!d.resource || !tracker?.youName || confirmedMonopolyHaul(tracker.players.values(), tracker.youName, d.resource) <= 0) return false;
       return send(monopolyActions(RESOURCE_TO_CARD_ID[d.resource]));
     }
     case "play-knight":
@@ -333,7 +338,9 @@ function buildLiveSummary(): unknown {
   }));
   const fits = you ? rankLiveStrategies(tracker, you, strategyPriors(loadRecords())) : [];
   const gs = bridge.board ? bridge.toGameState() : null;
-  const advice = gs ? advisePlacement(gs.state, gs.youPlayer) : null;
+  let advice = gs ? advisePlacement(gs.state, gs.youPlayer, tracker.players.size) : null;
+  const planning = computePlanning();
+  if (advice && planning && gs) advice = planningAdvice(advice, planning, gs.state);
   return {
     at: new Date().toISOString(),
     you,
@@ -385,8 +392,44 @@ function postLiveState(): void {
  * card tracking still runs for income-per-number learning, but these values
  * override any drift.
  */
+const rawEvents = new Map<number, GameEvent>();
+const decisionHistory: NonNullable<GameLog["decisions"]> = [];
+let handLedger: HandLedger | null = null;
+let historyComplete = false;
+let planningRevision = 0;
+let planningCache: { revision: number; value: PlanningContext | null } | null = null;
+const journalKey = () => `catanCopilot:ledger:${location.href}`;
+const boardKey = () => JSON.stringify(bridge.board?.hexes.map((h) => [h.q, h.r, h.kind, h.token]) ?? []);
+
+function syncLedger(): void {
+  if (!tracker?.youName || tracker.players.size !== 2 || bridge.myColor === null) return;
+  const opponent = [...tracker.players.values()].find((p) => p.name !== tracker!.youName)!;
+  if (!handLedger || handLedger.you !== tracker.youName || handLedger.opponent !== opponent.name) {
+    handLedger = new HandLedger(tracker.youName, opponent.name, historyComplete);
+    for (const [id, event] of rawEvents) handLedger.record(id, event);
+  }
+  const ownCards = bridge.state.playerStates?.[String(bridge.myColor)]?.resourceCards?.cards;
+  if (!Array.isArray(ownCards) || ownCards.some((id) => id < 1 || id > 5) || opponent.serverCards === null) return;
+  const mine = tracker.players.get(tracker.youName)!;
+  const result = handLedger.project({ mine: { ...mine.hand }, opponentTotal: opponent.serverCards });
+  opponent.trackingHealth = result.health;
+  opponent.trackingReason = result.reason;
+  if (result.opponent) { opponent.hand = result.opponent; opponent.uncertainty = 0; }
+  else opponent.uncertainty = Math.max(1, Math.abs(handTotal(opponent) - opponent.serverCards));
+}
+
+function recordDecision(decision: AutopilotDecision): void {
+  if (!tracker) return;
+  decisionHistory.push({ t: Date.now(), eventIndex: lastProcessedIndex, decision,
+    hands: [...tracker.players.values()].map((p) => ({ name: p.name, hand: { ...p.hand }, total: p.serverCards,
+      health: p.trackingHealth ?? "incomplete", publicVp: visibleVp(p) })),
+    buildings: bridge.buildings, roads: bridge.roads,
+  });
+}
+
 function syncTrackerFromState(): void {
   if (!tracker) return;
+  planningRevision++;
   const myColor = bridge.myColor;
   if (myColor !== null && !tracker.youName) {
     tracker.youName = bridge.colorToName.get(myColor) ?? tracker.youName;
@@ -401,6 +444,7 @@ function syncTrackerFromState(): void {
       // our own cards are fully known — replace the estimate outright
       for (const r of RESOURCES) p.hand[r] = hand.known[r] ?? 0;
       p.uncertainty = 0;
+      p.trackingHealth = "exact";
     } else {
       // opponents: cards are masked, but the TOTAL is authoritative — pull the
       // log-derived estimate back to it so a missed spend can't linger.
@@ -414,6 +458,7 @@ function syncTrackerFromState(): void {
     const limit = bridge.discardLimit(myColor);
     if (limit !== null) tracker.discardLimit = limit;
   }
+  syncLedger();
 }
 
 /**
@@ -493,8 +538,9 @@ function findChatScroller(): HTMLElement | null {
  * Our own row is exact (hand + production); opponents use the tracker's
  * estimated hand and learned production, so their numbers are best-effort.
  */
-function computeWinChances(): VictoryPlan[] {
-  if (!tracker) return [];
+function computePlanning(): PlanningContext | null {
+  if (planningCache?.revision === planningRevision) return planningCache.value;
+  if (!tracker?.youName || !tracker.players.has(tracker.youName)) return null;
   const gs = bridge.board ? bridge.toGameState() : null;
   const order = bridge.colorOrder();
   const inputs: PlayerVictoryInput[] = [];
@@ -520,6 +566,7 @@ function computeWinChances(): VictoryPlan[] {
       : Math.min(5, Math.round(Math.max(0, p.devCards) * 0.25));
     inputs.push({
       name,
+      playerId: pid,
       isYou,
       publicVp: bridge.publicVp(color),
       hiddenVp,
@@ -531,12 +578,27 @@ function computeWinChances(): VictoryPlan[] {
       knightsPlayed: p.knightsPlayed,
       longestRoadLen: bridge.longestRoad(color),
       hand: p.hand,
-      production: expectedProduction(p),
+      production: gs && pid >= 0 && pid <= 3 ? playerProduction(gs.state, pid as PlayerId) : expectedProduction(p),
+      cityProduction: gs ? gs.state.buildings.filter((b) => b.player === pid && b.kind === "settlement").map((b) => vertexIncome(gs.state, b.vertexId, 1)) : undefined,
+      bankRatios: bridge.bankRatios(color), rollsPerTurn: tracker.players.size,
+      holdsLargestArmy: (bridge.state.playerStates?.[String(color)]?.victoryPointsState?.["3"] ?? 0) > 0,
+      holdsLongestRoad: (bridge.state.playerStates?.[String(color)]?.victoryPointsState?.["2"] ?? 0) > 0,
+      knightsInHand: isYou ? countKnightsInHand() : 0,
+      playableKnights: isYou ? countKnightsInHand() : 0,
+      settlementRoutes: gs && pid >= 0 && pid <= 3 ? settlementRoutes(gs.state, pid as PlayerId) : undefined,
     });
   }
-  if (inputs.length === 0) return [];
-  return analyzeVictory(inputs, { target: bridge.winTarget, devDeckLeft: bridge.bankDevCards });
+  if (!inputs.some((p) => p.isYou)) return null;
+  const targetRoad = Math.max(5, 1 + Math.max(...inputs.map((p) => p.longestRoadLen)));
+  if (gs) for (const p of inputs) {
+    if (p.playerId === undefined) continue;
+    p.longestRoadPath = p.holdsLongestRoad ? null : roadBonusPath(gs.state, p.playerId as PlayerId, targetRoad, p.roadsLeft ?? 0);
+  }
+  const value = planPosition(tracker, tracker.youName, gs, { inputs, target: bridge.winTarget, devDeckLeft: bridge.bankDevCards });
+  planningCache = { revision: planningRevision, value };
+  return value;
 }
+function computeWinChances(): VictoryPlan[] { return computePlanning()?.victories ?? []; }
 
 function scheduleRender(): void {
   if (renderTimer !== undefined) return;
@@ -634,11 +696,16 @@ function processRow(el: Element): void {
   if (idxAttr === null) return;
   const idx = parseInt(idxAttr, 10);
   // The virtual scroller re-renders overlapping windows; <= skips replays.
-  if (Number.isNaN(idx) || idx <= lastProcessedIndex) return;
-  lastProcessedIndex = idx;
+  if (Number.isNaN(idx)) return;
   const ev = parseLogRow(el);
-  applyEvent(tracker, ev);
-  recordMove(ev);
+  const previous = rawEvents.get(idx);
+  if (previous && JSON.stringify(previous) === JSON.stringify(ev)) return;
+  lastProcessedIndex = Math.max(lastProcessedIndex, idx);
+  rawEvents.set(idx, ev);
+  handLedger?.record(idx, ev);
+  if (!previous || previous.type === "ignored") { applyEvent(tracker, ev); recordMove(ev); }
+  syncTrackerFromState();
+  try { localStorage.setItem(journalKey(), JSON.stringify({ board: boardKey(), complete: historyComplete, events: [...rawEvents] })); } catch { /* export remains available */ }
 
   // Log-confirmed actions close the learner/autopilot loop for actions that
   // have no dedicated WebSocket event we track.
@@ -685,7 +752,7 @@ let gameStartTime = 0;
 function saveFullGameLog(): void {
   if (!tracker) return;
   const you = tracker.youName;
-  const winnerEntry = [...tracker.players.values()].find((p) => visibleVp(p) >= 10);
+  const winnerEntry = [...tracker.players.values()].find((p) => visibleVp(p) >= bridge.winTarget);
   const winner =
     typeof tracker.gameOver === "string" ? tracker.gameOver : (winnerEntry?.name ?? null);
   const fits = you ? rankLiveStrategies(tracker, you, strategyPriors(loadRecords())) : [];
@@ -699,7 +766,7 @@ function saveFullGameLog(): void {
     playerCount: tracker.players.size,
     settings: {
       friendlyRobber: bridge.friendlyRobber,
-      victoryPointsToWin: null,
+      victoryPointsToWin: bridge.winTarget,
       discardLimit: tracker.discardLimit,
     },
     recommendedStrategy: fits[0]?.strategy.name ?? null,
@@ -734,6 +801,9 @@ function saveFullGameLog(): void {
       }));
     })(),
     moves: moveHistory.slice(),
+    complete: historyComplete && tracker.players.size >= 2 && winner !== null,
+    events: [...rawEvents].sort(([a], [b]) => a - b).map(([id, event]) => ({ id, event })),
+    decisions: decisionHistory.slice(),
   };
   saveGameLog(log);
   // Also append to the on-disk corpus if the local bridge is running.
@@ -762,6 +832,20 @@ let observedScroller: HTMLElement | null = null;
 
 function attach(scroller: HTMLElement): void {
   tracker = createTracker(getYouName());
+  handLedger = null;
+  rawEvents.clear();
+  decisionHistory.length = 0;
+  historyComplete = bridge.turnState === 0 && bridge.buildings.length < 3;
+  try {
+    const saved = JSON.parse(localStorage.getItem(journalKey()) ?? "null");
+    if (saved?.board === boardKey() && Array.isArray(saved.events)) {
+      historyComplete = saved.complete === true;
+      for (const [id, event] of saved.events as Array<[number, GameEvent]>) {
+        rawEvents.set(id, event); applyEvent(tracker, event);
+      }
+    }
+  } catch { /* a corrupt checkpoint is incomplete, never a made-up hand */ }
+  planningRevision++;
   // The INIT frame usually lands before the log scroller exists (so before
   // this tracker did), and setup turns send no diffs while the game waits on
   // a placement — pull the roster/hands from the bridge now, not on the next
@@ -782,6 +866,7 @@ function attach(scroller: HTMLElement): void {
       onDownloadCapture: downloadCapture,
       getAutopilotView: () => autopilot.view(),
       getWinChances: () => computeWinChances(),
+      getPlanning: () => computePlanning(),
       getRushView: () => ({ ...rushPilot.view(), active: rushActive(), pref: rushPref, modeSetting: bridge.modeSetting }),
       onSetRushPref: (pref) => {
         rushPref = pref;
@@ -855,7 +940,9 @@ function rushTick(): void {
   rushPilot.setRobberPending(domSaysMoveRobber());
   rushPilot.setDiscardPending(domSaysDiscard());
   const gs = bridge.board ? bridge.toGameState() : null;
-  const advice = gs ? advisePlacement(gs.state, gs.youPlayer) : null;
+  let advice = gs ? advisePlacement(gs.state, gs.youPlayer, tracker.players.size) : null;
+  const planning = computePlanning();
+  if (advice && planning && gs) advice = planningAdvice(advice, planning, gs.state);
   const fits = rankLiveStrategies(tracker, tracker.youName, strategyPriors(loadRecords()));
   const colorOrder = bridge.colorOrder();
   const canRob = (player: number): boolean => {
@@ -904,7 +991,9 @@ window.setInterval(() => {
   // checks the hand is actually oversized before selecting cards.
   autopilot.setDiscardPending(domSaysDiscard());
   const gs = bridge.board ? bridge.toGameState() : null;
-  const advice = gs ? advisePlacement(gs.state, gs.youPlayer) : null;
+  let advice = gs ? advisePlacement(gs.state, gs.youPlayer, tracker.players.size) : null;
+  const planning = computePlanning();
+  if (advice && planning && gs) advice = planningAdvice(advice, planning, gs.state);
   const fits = rankLiveStrategies(tracker, tracker.youName, strategyPriors(loadRecords()));
   // Friendly robber: a player can be robbed only with >= 3 public VP. Map the
   // engine PlayerId back to its colonist color to read that player's VP.
@@ -928,6 +1017,7 @@ window.setInterval(() => {
     tradeOffers: bridge.pendingTradeOffers(),
     winTarget: bridge.winTarget,
     endgameStep: ourEndgameStep(),
+    planning: planning ?? undefined,
     playerCount: bridge.colorToName.size,
   });
   // our own open offer appearing in the state confirms the proposal went out

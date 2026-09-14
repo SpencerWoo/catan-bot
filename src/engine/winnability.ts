@@ -1,4 +1,5 @@
 import { RESOURCES, Resource } from "./types";
+import { turnsToAfford } from "./horizon";
 
 /**
  * Win-probability & path-to-victory model.
@@ -37,6 +38,7 @@ const TAU = 2.0;
 
 export interface PlayerVictoryInput {
   name: string;
+  playerId?: number;
   isYou: boolean;
   /** public victory points (buildings + any bonus they already hold) */
   publicVp: number;
@@ -59,6 +61,17 @@ export interface PlayerVictoryInput {
   hand: Hand;
   /** expected cards per roll, per resource */
   production: Hand;
+  cityProduction?: Hand[];
+  bankRatios?: Cost;
+  rollsPerTurn?: number;
+  holdsLargestArmy?: boolean;
+  holdsLongestRoad?: boolean;
+  knightsInHand?: number;
+  playableKnights?: number;
+  /** Verified board routes; an empty array means no accessible sites. */
+  settlementRoutes?: Array<{ vertexId: number; edges: number[]; conflicts: number[]; production?: Hand }>;
+  /** Verified extension, null means no route found by the bounded search. */
+  longestRoadPath?: number[] | null;
 }
 
 export interface WinContext {
@@ -75,6 +88,10 @@ export interface VictoryStep {
   vp: number;
   cost: Cost;
   note: string;
+  delay?: number;
+  production?: Hand;
+  vertexId?: number;
+  roadEdges?: number[];
 }
 
 export interface VictoryPlan {
@@ -111,12 +128,7 @@ function scaleCost(c: Cost, k: number): Cost {
 }
 
 /** A single VP "buy" available to a player. */
-interface Buy {
-  kind: VictoryStepKind;
-  vp: number;
-  cost: Cost;
-  note: string;
-}
+interface Buy extends VictoryStep { conflicts?: number[]; }
 
 /** Enumerate every VP source still open to a player, cheapest-first per unit. */
 function buysFor(p: PlayerVictoryInput, ctx: WinContext, holdsLA: boolean, holdsLR: boolean, laReach: boolean, lrReach: boolean, knightsToLA: number, roadsToLR: number): Buy[] {
@@ -126,21 +138,24 @@ function buysFor(p: PlayerVictoryInput, ctx: WinContext, holdsLA: boolean, holds
   // supply and the settlements actually on the board.
   const cityN = Math.min(p.citiesLeft ?? Infinity, p.settlementsOnBoard);
   for (let i = 0; i < cityN; i++) {
-    buys.push({ kind: "city", vp: 1, cost: BUILD.city, note: "upgrade a settlement to a city" });
+    buys.push({ kind: "city", vp: 1, cost: BUILD.city, note: "upgrade a settlement to a city",
+      production: p.cityProduction?.[i] ?? Object.fromEntries(RESOURCES.map((r) => [r,
+        p.production[r] / Math.max(1, p.settlementsOnBoard + 2 * (4 - (p.citiesLeft ?? 4)))])) as Hand });
   }
 
   // Settlements: the first is free of roads if a spot is open now; each further
   // one assumes a road to open a new corner.
   const settN = p.settlementsLeft ?? 0;
   const freeSpots = p.settlementSpotOpen ? 1 : 0;
-  for (let i = 0; i < settN; i++) {
-    const needsRoad = i >= freeSpots;
-    buys.push({
-      kind: "settlement",
-      vp: 1,
-      cost: needsRoad ? addCost(BUILD.settlement, BUILD.road) : BUILD.settlement,
-      note: needsRoad ? "road + settlement to a new spot" : "settlement on an open spot",
-    });
+  const routes = p.settlementRoutes?.slice().sort((a, b) => a.edges.length - b.edges.length);
+  for (let i = 0; i < (routes?.length ?? settN); i++) {
+    const route = routes?.[i];
+    const roads = route ? route.edges.length : i >= freeSpots ? 1 : 0;
+    if (roads > (p.roadsLeft ?? 0)) continue;
+    buys.push({ kind: "settlement", vp: 1,
+      cost: addCost(BUILD.settlement, scaleCost(BUILD.road, roads)),
+      note: roads ? `${roads} road${roads === 1 ? "" : "s"} + settlement` : "settlement on an open spot",
+      production: route?.production, vertexId: route?.vertexId, roadEdges: route?.edges, conflicts: route?.conflicts });
   }
 
   // Largest Army (+2): only if we can still take it and the deck can supply it.
@@ -148,7 +163,8 @@ function buysFor(p: PlayerVictoryInput, ctx: WinContext, holdsLA: boolean, holds
     buys.push({
       kind: "largest-army",
       vp: BONUS_VP,
-      cost: scaleCost(BUILD.dev, knightsToLA),
+      cost: scaleCost(BUILD.dev, Math.max(0, knightsToLA - (p.knightsInHand ?? 0)) / (14 / 25)),
+      delay: Math.max(0, knightsToLA - ((p.playableKnights ?? 0) > 0 ? 1 : 0)),
       note: `${knightsToLA} more knight${knightsToLA > 1 ? "s" : ""} for Largest Army`,
     });
   }
@@ -159,6 +175,7 @@ function buysFor(p: PlayerVictoryInput, ctx: WinContext, holdsLA: boolean, holds
       kind: "longest-road",
       vp: BONUS_VP,
       cost: scaleCost(BUILD.road, roadsToLR),
+      roadEdges: p.longestRoadPath ?? undefined,
       note: `${roadsToLR} more road${roadsToLR > 1 ? "s" : ""} for Longest Road`,
     });
   }
@@ -180,30 +197,75 @@ function buysFor(p: PlayerVictoryInput, ctx: WinContext, holdsLA: boolean, holds
  * cost-per-VP would wrongly spend 9 cards on a +2 bonus to close a 1-VP gap a
  * 5-card city closes. gap ≤ target and the item pool is tiny, so this is cheap.
  */
-function cheapestPlan(buys: Buy[], gap: number): Buy[] {
+function cheapestPlan(buys: Buy[], gap: number, player: PlayerVictoryInput): Buy[] {
   if (gap <= 0) return [];
-  const INF = Infinity;
-  // dp[v] = cheapest way to have gained (capped) v VP
-  const dp: Array<{ cost: number; items: Buy[] }> = Array.from({ length: gap + 1 }, (_, i) => ({
-    cost: i === 0 ? 0 : INF,
-    items: [],
-  }));
+  type Candidate = { items: Buy[]; cost: Cost; time: number; roads: number; settlements: number };
+  const rate = Object.fromEntries(RESOURCES.map((r) => [r, player.production[r] * (player.rollsPerTurn ?? 2)])) as Hand;
+  const dp: Candidate[][] = Array.from({ length: Math.ceil(gap) + 1 }, () => []);
+  dp[0] = [{ items: [], cost: {}, time: 0, roads: 0, settlements: 0 }];
   for (const b of buys) {
-    const bc = costCards(b.cost);
-    for (let v = gap; v >= 0; v--) {
-      if (dp[v].cost === INF) continue;
-      const nv = Math.min(gap, v + b.vp);
-      if (dp[v].cost + bc < dp[nv].cost) {
-        dp[nv] = { cost: dp[v].cost + bc, items: [...dp[v].items, b] };
+    for (let v = dp.length - 2; v >= 0; v--) {
+      for (const c of [...dp[v]]) {
+        if (b.vertexId !== undefined && c.items.some((x) => x.vertexId === b.vertexId || x.conflicts?.includes(b.vertexId!))) continue;
+        const settlements = c.settlements + (b.kind === "settlement" ? 1 : 0);
+        if (settlements > (player.settlementsLeft ?? 0)) continue;
+        const edges = new Set(c.items.flatMap((x) => x.roadEdges ?? []));
+        const extraRoads = b.roadEdges ? b.roadEdges.filter((id) => !edges.has(id)).length :
+          b.kind === "longest-road" ? b.cost.wood ?? 0 : b.kind === "settlement" ? (b.cost.wood ?? 1) - 1 : 0;
+        const roads = c.roads + extraRoads;
+        if (roads > (player.roadsLeft ?? 0)) continue;
+        const cost = addCost(c.cost, b.cost);
+        const shared = (b.roadEdges?.length ?? extraRoads) - extraRoads;
+        if (shared > 0) { cost.wood = (cost.wood ?? 0) - shared; cost.brick = (cost.brick ?? 0) - shared; }
+        const delay = Math.max(b.delay ?? 0, ...c.items.map((x) => x.delay ?? 0));
+        const time = turnsToAfford(cost, player.hand, rate, player.bankRatios) + delay;
+        const nv = Math.min(dp.length - 1, v + b.vp);
+        dp[nv].push({ items: [...c.items, b], cost, time, roads, settlements });
+      }
+      // Keep several different resource/route portfolios, not just cheapest cards.
+      for (let n = v + 1; n < dp.length; n++) {
+        dp[n].sort((a, b) => a.time - b.time || costCards(a.cost) - costCards(b.cost));
+        dp[n] = dp[n].slice(0, 24);
       }
     }
   }
-  return dp[gap].items;
+  return dp[dp.length - 1].sort((a, b) => sequenceTime(a.items, player) - sequenceTime(b.items, player))[0]?.items ?? [];
+}
+
+/** Finance successive builds, adding their production as soon as built.
+ * This avoids projecting an entire game's costs at the opening economy. */
+function sequenceTime(steps: VictoryStep[], p: PlayerVictoryInput): number {
+  const hand = { ...p.hand };
+  const rolls = p.rollsPerTurn ?? 2;
+  const rate = Object.fromEntries(RESOURCES.map((r) => [r, p.production[r] * rolls])) as Hand;
+  const usedRoads = new Set<number>();
+  let elapsed = 0;
+  for (const step of steps) {
+    const cost = { ...step.cost };
+    for (const id of step.roadEdges ?? []) {
+      if (usedRoads.has(id)) { cost.wood = (cost.wood ?? 0) - 1; cost.brick = (cost.brick ?? 0) - 1; }
+      usedRoads.add(id);
+    }
+    const wait = turnsToAfford(cost, hand, rate, p.bankRatios);
+    if (!Number.isFinite(wait)) return Infinity;
+    elapsed += wait;
+    let missing = 0;
+    for (const r of RESOURCES) {
+      hand[r] += rate[r] * wait - (cost[r] ?? 0);
+      if (hand[r] < 0) { missing -= hand[r]; hand[r] = 0; }
+    }
+    for (const r of [...RESOURCES].sort((a, b) => (p.bankRatios?.[a] ?? 4) - (p.bankRatios?.[b] ?? 4))) {
+      const take = Math.min(missing, hand[r] / (p.bankRatios?.[r] ?? 4));
+      hand[r] -= take * (p.bankRatios?.[r] ?? 4); missing -= take;
+    }
+    for (const r of RESOURCES) rate[r] += (step.production?.[r] ?? 0) * rolls;
+  }
+  return elapsed + Math.max(0, ...steps.map((s) => s.delay ?? 0));
 }
 
 function summarise(p: PlayerVictoryInput, plan: VictoryStep[], eliminated: boolean, laReach: boolean, lrReach: boolean): string {
   if (p.publicVp <= 0 && plan.length === 0 && eliminated) return "not in the game yet";
-  if (eliminated) return "eliminated — nothing left to build to the target";
+  if (eliminated) return "no verified path to the target with the available pieces and routes";
   if (plan.length === 0) return "already at the target";
   const counts = new Map<VictoryStepKind, number>();
   for (const s of plan) counts.set(s.kind, (counts.get(s.kind) ?? 0) + 1);
@@ -235,45 +297,44 @@ export function analyzeVictory(players: PlayerVictoryInput[], ctx: WinContext): 
   const roadLeaders = players.filter((p) => p.longestRoadLen === maxRoad && maxRoad >= 5);
 
   const plans: VictoryPlan[] = players.map((p) => {
-    const holdsLA = knightLeaders.length === 1 && knightLeaders[0].name === p.name;
-    const holdsLR = roadLeaders.length === 1 && roadLeaders[0].name === p.name;
+    const holdsLA = p.holdsLargestArmy ?? (knightLeaders.length === 1 && knightLeaders[0].name === p.name);
+    const holdsLR = p.holdsLongestRoad ?? (roadLeaders.length === 1 && roadLeaders[0].name === p.name);
 
     // knights needed to seize Largest Army: beat the leader, or reach the
     // minimum of 3 if nobody holds it yet.
     const knightsToLA = holdsLA ? 0 : Math.max(3, maxKnights + 1) - p.knightsPlayed;
     const laReach =
-      !holdsLA && knightsToLA >= 1 && (ctx.devDeckLeft === null || ctx.devDeckLeft >= knightsToLA);
-    const roadsToLR = holdsLR ? 0 : Math.max(5, maxRoad + 1) - p.longestRoadLen;
+      !holdsLA && knightsToLA >= 1 && (ctx.devDeckLeft === null || ctx.devDeckLeft + (p.knightsInHand ?? 0) >= knightsToLA);
+    const roadsToLR = holdsLR ? 0 : p.longestRoadPath === null ? Infinity : p.longestRoadPath?.length ?? Math.max(5, maxRoad + 1) - p.longestRoadLen;
     const lrReach = !holdsLR && roadsToLR >= 1 && (p.roadsLeft ?? 0) >= roadsToLR;
 
-    const gap = ctx.target - p.publicVp - (p.hiddenVp ?? 0);
+    const gap = Math.ceil(ctx.target - p.publicVp - (p.hiddenVp ?? 0));
     const buys = buysFor(p, ctx, holdsLA, holdsLR, laReach, lrReach, knightsToLA, roadsToLR);
     const maxAttainable = buys.reduce((s, b) => s + b.vp, 0);
-    const eliminated = gap > 0 && maxAttainable < gap;
+    let eliminated = gap > 0 && maxAttainable < gap;
     const won = gap <= 0;
 
-    const chosen = won ? [] : cheapestPlan(buys, gap);
-    const steps: VictoryStep[] = chosen.map((b) => ({ kind: b.kind, vp: b.vp, cost: b.cost, note: b.note }));
+    const chosen = won ? [] : cheapestPlan(buys, gap, p);
+    if (!won && chosen.length === 0) eliminated = true;
+    const steps: VictoryStep[] = chosen.map((b) => ({ kind: b.kind, vp: b.vp, cost: b.cost, note: b.note, delay: b.delay, production: b.production, vertexId: b.vertexId, roadEdges: b.roadEdges }));
     const planVp = steps.reduce((s, b) => s + b.vp, 0);
 
-    const totalCost = steps.reduce<Cost>((acc, s) => addCost(acc, s.cost), {});
+    const fundedRoads = new Set<number>();
+    const totalCost = steps.reduce<Cost>((acc, s) => {
+      const next = addCost(acc, s.cost);
+      for (const id of s.roadEdges ?? []) {
+        if (fundedRoads.has(id)) { next.wood = (next.wood ?? 0) - 1; next.brick = (next.brick ?? 0) - 1; }
+        fundedRoads.add(id);
+      }
+      return next;
+    }, {});
     const need: Cost = {};
     for (const r of RESOURCES) {
       const n = (totalCost[r] ?? 0) - p.hand[r];
       if (n > 0) need[r] = n;
     }
 
-    // turns: cards still needed, weighting resources we DON'T produce (must be
-    // traded for ~3:1) more heavily, divided by production per roll. Also bound
-    // below by the number of build actions (roughly one major build per turn).
-    const prodTotal = RESOURCES.reduce((s, r) => s + p.production[r], 0);
-    const weightedNeed = RESOURCES.reduce(
-      (s, r) => s + (need[r] ?? 0) * (p.production[r] > 0.05 ? 1 : 3),
-      0,
-    );
-    const resourceTurns = weightedNeed / Math.max(prodTotal, 0.25);
-    const buildTurns = steps.length * 0.8;
-    const turnsToWin = won ? 0 : eliminated ? Infinity : Math.max(resourceTurns, buildTurns);
+    const turnsToWin = won ? 0 : eliminated ? Infinity : sequenceTime(steps, p);
 
     return {
       name: p.name,

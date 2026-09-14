@@ -205,7 +205,7 @@ export class StateBridge {
    *   0 = settlements (count, 1 VP each)   1 = cities (count, 2 VP each —
    *       a settlement leaves key 0 when it's upgraded: {"0":1,"1":1} = 3 VP)
    *   2 = Longest Road (flag → 2)          3 = Largest Army (flag → 2)
-   *   4 = victory-point dev cards (points)
+   *   4 = victory-point dev cards (excluded from PUBLIC points)
    * Verified against a real 15-9 game that the old "+1 per city" weighting
    * reported as 11-6 (4 and 2 cities under-counted by one each).
    */
@@ -217,7 +217,7 @@ export class StateBridge {
       const v = (n as number) ?? 0;
       if (k === "1") total += v * 2;
       else if (k === "2" || k === "3") total += v > 0 ? 2 : 0;
-      else total += v;
+      else if (k !== "4") total += v;
     }
     return total;
   }
