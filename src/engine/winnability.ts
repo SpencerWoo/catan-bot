@@ -96,7 +96,7 @@ export interface VictoryPlan {
   /** resources still to acquire for the plan (plan cost minus hand) */
   need: Cost;
   turnsToWin: number;
-  /** 0..1, normalised across the table */
+  /** Legacy relative ranking weight, NOT a calibrated win probability. */
   winProb: number;
   largestArmyReachable: boolean;
   longestRoadReachable: boolean;
@@ -249,10 +249,10 @@ function sequenceTime(steps: VictoryStep[], p: PlayerVictoryInput): number {
     let missing = 0;
     for (const r of RESOURCES) {
       hand[r] += rate[r] * wait - (cost[r] ?? 0);
-      if (hand[r] < 0) { missing -= hand[r]; hand[r] = 0; }
+      if (hand[r] < -1e-9) { const bought = Math.ceil(-hand[r] - 1e-9); missing += bought; hand[r] += bought; }
     }
     for (const r of [...RESOURCES].sort((a, b) => (p.bankRatios?.[a] ?? 4) - (p.bankRatios?.[b] ?? 4))) {
-      const take = Math.min(missing, hand[r] / (p.bankRatios?.[r] ?? 4));
+      const take = Math.min(Math.ceil(missing - 1e-9), Math.floor((hand[r] + 1e-9) / (p.bankRatios?.[r] ?? 4)));
       hand[r] -= take * (p.bankRatios?.[r] ?? 4); missing -= take;
     }
     for (const r of RESOURCES) rate[r] += (step.production?.[r] ?? 0) * rolls;
@@ -276,7 +276,7 @@ function summarise(p: PlayerVictoryInput, plan: VictoryStep[], eliminated: boole
   const parts: string[] = [];
   for (const [kind, n] of counts) parts.push(`${n} ${n > 1 ? label[kind][1] : label[kind][0]}`);
   let s = parts.join(" + ");
-  if ((p.hiddenVp ?? 0) > 0) s = `(+${p.isYou ? "" : "~"}${p.hiddenVp} hidden) ` + s;
+  if ((p.hiddenVp ?? 0) > 0) s = `(+${p.isYou ? "" : "~"}${Number(p.hiddenVp.toFixed(1))} hidden) ` + s;
   // Call out a blocked natural path so the "why" is explicit.
   if ((p.citiesLeft ?? 1) === 0 && p.settlementsOnBoard > 0) s += " (no cities left)";
   if (!laReach && !lrReach && (p.roadsLeft ?? 1) === 0) s += "; roads spent";

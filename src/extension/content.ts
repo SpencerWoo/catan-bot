@@ -624,7 +624,7 @@ function computePlanning(): PlanningContext | null {
       cityProduction: gs ? gs.state.buildings.filter((b) => b.player === pid && b.kind === "settlement").map((b) => vertexIncome(gs.state, b.vertexId, 1)) : undefined,
       bankRatios: bridge.bankRatios(color), rollsPerTurn: tracker.players.size,
       holdsLargestArmy: (bridge.state.playerStates?.[String(color)]?.victoryPointsState?.["3"] ?? 0) > 0,
-      holdsLongestRoad: (bridge.state.playerStates?.[String(color)]?.victoryPointsState?.["2"] ?? 0) > 0,
+      holdsLongestRoad: bridge.holdsLongestRoad(color),
       knightsInHand: isYou ? bridge.myDevCardIds().filter((id) => id === 11).length : 0,
       playableKnights: isYou ? bridge.myDevCardIds().filter((id) => id === 11).length : 0,
       settlementRoutes: gs && pid >= 0 && pid <= 3 ? settlementRoutes(gs.state, pid as PlayerId) : undefined,

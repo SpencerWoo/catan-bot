@@ -3,14 +3,14 @@ import type { Cost, Hand } from "./winnability";
 
 /** Expected own turns to fund a cost, including resource-specific shortages
  * and trades of surplus only. Production is cards per OWN turn here. Future
- * fractional income/trades are expectations, not executable bank trades. */
+ * income is an expectation; separate resource piles never pool trade fractions. */
 export function turnsToAfford(cost: Cost, hand: Hand, production: Hand, ratios: Cost = {}): number {
   const covered = (turns: number): boolean => {
     let shortage = 0, exchange = 0;
     for (const r of RESOURCES) {
       const spare = hand[r] + production[r] * turns - (cost[r] ?? 0);
-      if (spare < 0) shortage -= spare;
-      else exchange += turns === 0 ? Math.floor(spare / (ratios[r] ?? 4)) : spare / (ratios[r] ?? 4);
+      if (spare < -1e-9) shortage += Math.ceil(-spare - 1e-9);
+      else exchange += Math.floor((spare + 1e-9) / (ratios[r] ?? 4));
     }
     return exchange + 1e-9 >= shortage;
   };

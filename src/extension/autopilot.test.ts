@@ -410,7 +410,7 @@ describe("risk profile and opponent weakness", () => {
     expect(t?.describe).toContain("starving");
   });
 
-  it("does not override a productive plan merely because the VP gap is large", async () => {
+  it("buys an affordable dev when the city is genuinely distant, even with a large VP gap", async () => {
     const { riskModeOf } = await import("./autopilot");
     expect(riskModeOf(0.2)).toBe("lotto");
     const t = trackerWith({ sheep: 1, wheat: 1, ore: 1 }, false);
@@ -435,8 +435,7 @@ describe("risk profile and opponent weakness", () => {
     const d = decideNext({
       tracker: t, youName: "Nick", fit, gs, advice: null, rolledThisTurn: true,
     });
-    expect(d?.kind).toBe("end-turn");
-    expect(d?.describe).toContain("save for");
+    expect(d?.kind).toBe("buy-dev");
   });
 
 
@@ -543,7 +542,7 @@ describe("autopilot decisions", () => {
     const gs = gsWithSettlement();
     const v = gs.state.board.vertices[gs.state.buildings[0].vertexId];
     const hex = gs.state.board.hexes[v.hexIds[0]];
-    const t = trackerWith({ ore: 1, sheep: 1, wheat: 1, wood: 1, brick: 1 }, false);
+    const t = trackerWith({ ore: 2, sheep: 1, wheat: 2 }, false);
     const fits = rankLiveStrategies(t, "Nick");
     const d = decideNext({
       tracker: t, youName: "Nick", fit: fits[0], gs, advice: null, rolledThisTurn: true,
@@ -843,12 +842,13 @@ describe("autopilot decisions", () => {
     });
     expect(d1?.kind).toBe("build-road");
 
-    // one road short of the full claim -> hold (don't telegraph the spot)
+    // One road short, but production can fund the rest within the horizon:
+    // staging a useful road is productive.
     const t2 = trackerWith({ wood: 2, brick: 2, sheep: 1, wheat: 1 }, false);
     const d2 = decideNext({
       tracker: t2, youName: "Nick", fit: fit(), gs, advice, rolledThisTurn: true,
     });
-    expect(d2?.kind).not.toBe("build-road");
+    expect(d2?.kind).toBe("build-road");
   });
 
   it("plays Road Building when the advised path claims a spot it can then settle", () => {
@@ -1093,7 +1093,7 @@ describe("autopilot decisions", () => {
     expect(board.vertices[M].hexIds.some((id) => board.hexes[id].kind === "wheat")).toBe(true);
   });
 
-  it("accepts discard risk while saving for a city it cannot finish this turn", () => {
+  it("funds an affordable dev with 4:1 trades rather than hoard for an unfunded city", () => {
     // 11 cards of wood/sheep, one settlement to upgrade, a city 5 cards away:
     // not completable with trades this turn, but sitting on it just feeds 7s.
     const t = trackerWith({ wood: 6, sheep: 5 }, false);
@@ -1101,8 +1101,10 @@ describe("autopilot decisions", () => {
     const d = decideNext({
       tracker: t, youName: "Nick", fit: fits[0], gs: gsWithSettlement(), advice: null, rolledThisTurn: true,
     });
-    expect(d?.kind).toBe("end-turn");
-    expect(d?.describe).toContain("save for city");
+    expect(d?.kind).toBe("bank-trade");
+    expect(d?.trade?.giveCount).toBe(4);
+    expect(d?.funding?.kind).toBe("dev");
+
   });
 
   it("endgame steering: builds the win-model's step first", () => {

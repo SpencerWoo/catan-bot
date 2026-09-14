@@ -3,7 +3,7 @@ import { isVertexBuildable, playerProduction } from "../engine/analysis";
 import { analyzeVictory, BUILD, Cost, Hand, PlayerVictoryInput, VictoryPlan } from "../engine/winnability";
 import { BuildEvaluation, BuildOption, evaluateBuilds, gameHorizon, Horizon } from "../engine/horizon";
 import { roadPathTo, PlacementAdvice, describeVertex } from "./placement";
-import { expectedProduction } from "./copilot";
+import { expectedProduction, deckStatus, planDiscard } from "./copilot";
 import { TrackerState, visibleVp } from "./tracker";
 
 export interface PlanningContext {
@@ -80,10 +80,20 @@ export function roadBonusPath(state: GameState, player: PlayerId, target: number
   const blocked = new Set(state.buildings.filter((b) => b.player !== player).map((b) => b.vertexId));
   for (let depth = 0; depth <= Math.min(3, supply); depth++) {
     const next: Array<{ path: number[]; length: number }> = [];
+    const winners: Array<{ path: number[]; access: number }> = [];
     for (const path of frontier) {
       const trial = { ...state, roads: [...state.roads, ...path.map((edgeId) => ({ edgeId, player }))] };
       const length = longestRoad(trial, player);
-      if (length >= target) return path;
+      if (length >= target) {
+        // Among equally short bonus routes, keep useful settlement access.
+        // Never spend an extra piece just to make an uncontested road longer.
+        const access = settlementRoutes(trial, player)
+          .filter(r => r.edges.length <= supply - path.length)
+          .reduce((best, r) => Math.max(best,
+            Object.values(r.production).reduce((n, x) => n + x, 0) / (1 + r.edges.length)), 0);
+        winners.push({ path, access });
+        continue;
+      }
       const nodes = new Set(trial.roads.filter((r) => r.player === player).flatMap((r) => [state.board.edges[r.edgeId].a, state.board.edges[r.edgeId].b]));
       for (const b of state.buildings) if (b.player === player) nodes.add(b.vertexId);
       for (const edge of state.board.edges) if (!occupied.has(edge.id) && !path.includes(edge.id) &&
@@ -91,6 +101,7 @@ export function roadBonusPath(state: GameState, player: PlayerId, target: number
         next.push({ path: [...path, edge.id], length });
       }
     }
+    if (winners.length) return winners.sort((a, b) => b.access - a.access)[0].path;
     const seen = new Set<string>();
     frontier = next.sort((a, b) => b.length - a.length).filter((x) => {
       const key = [...x.path].sort((a, b) => a - b).join(",");
@@ -191,6 +202,22 @@ export function planPosition(tracker: TrackerState, youName: string,
     options.push({ kind: "dev", cost: BUILD.dev, vp: 5 / 25 + armyValue, production: unblocking });
   }
   const builds = evaluateBuilds(options, you.hand, production, you.bankRatio, remaining, gap, horizon);
+  // Saving exposes an over-limit reserve to intervening sevens. Compare the
+  // retained investment after a useful discard with the no-discard case;
+  // affordable actions have no waiting exposure. This is an expected-value
+  // approximation, not a command to spend cards on arbitrary roads/trades.
+  const total = RESOURCES.reduce((n, r) => n + you.hand[r], 0);
+  if (total > tracker.discardLimit) {
+    const seven = deckStatus(tracker).prob.get(7) ?? 1 / 6;
+    for (const build of builds) if (build.wait > 0) {
+      const discard = planDiscard(you.hand, Math.floor(total / 2), null, build.cost);
+      const retained = Object.fromEntries(RESOURCES.map(r => [r, you.hand[r] - (discard[r] ?? 0)])) as Hand;
+      const after = evaluateBuilds([build], retained, production, you.bankRatio, remaining, gap, horizon)[0];
+      const exposure = 1 - Math.pow(1 - seven, rolls * Math.max(1, build.wait));
+      build.score = (1 - exposure) * build.score + exposure * Math.min(build.score, after.score);
+    }
+    builds.sort((a, b) => b.score - a.score || a.wait - b.wait);
+  }
   const reserve = builds[0]?.cost ?? remaining;
   const weights = Object.fromEntries(RESOURCES.map((r) => [r,
     1 + Math.max(0, (reserve[r] ?? 0) - you.hand[r]) / (1 + production[r] * horizon.turns)])) as Hand;

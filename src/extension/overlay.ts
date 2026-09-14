@@ -629,7 +629,6 @@ export class Overlay {
   private renderRecord(): string {
     const st = recordStats(loadRecords());
     if (!st) return "";
-    const pct = (x: number) => `${Math.round(x * 100)}%`;
     const tile = (v: string, k: string, cls = "") =>
       `<div class="cc-tile ${cls}"><div class="v">${v}</div><div class="k">${k}</div></div>`;
     const form = st.recent
@@ -637,6 +636,7 @@ export class Overlay {
       .join("");
     const streak =
       st.streak >= 2 ? `${st.streak} wins in a row` : st.streak <= -2 ? `${-st.streak} losses in a row` : "";
+    const pct = (x: number) => `${Math.round(x * 100)}%`;
     const split = (label: string, rows: Array<{ name: string; games: number; wins: number; winRate: number }>) =>
       rows.length < 1
         ? ""
@@ -789,18 +789,17 @@ export class Overlay {
       ${hitLine}${dueLine}`;
   }
 
-  /** Win chance + path-to-victory per player (heuristic estimate). */
+  /** Completion forecast; the heuristic is not a calibrated win probability. */
   private renderWinChances(): string {
     const plans = this.hooks.getWinChances?.() ?? [];
     if (plans.length === 0) return "";
-    const pct = (x: number) => `${Math.round(x * 100)}%`;
     const target = plans[0].target;
     const rows = plans
       .map((p) => {
         const cls = p.eliminated ? "out" : p.isYou ? "you" : "";
-        const bar = p.eliminated
-          ? `<div class="cc-wbar"><em>out</em></div>`
-          : `<div class="cc-wbar"><span style="width:${pct(p.winProb)}"></span><em>${pct(p.winProb)}</em></div>`;
+        const bar = p.eliminated || !Number.isFinite(p.turnsToWin)
+          ? `<span class="cc-muted">No verified route</span>`
+          : `<strong>~${p.turnsToWin.toFixed(1)} own turns</strong>`;
         const needBits = RESOURCES.filter((r) => (p.need[r] ?? 0) > 0).map((r) => `${p.need[r]} ${r}`);
         const need = needBits.length ? ` <span class="cc-muted">· need ${esc(needBits.join(", "))}</span>` : "";
         const tag = p.largestArmyReachable ? "" : "";
@@ -814,7 +813,8 @@ export class Overlay {
       })
       .join("");
     return `
-      <h4>Win chance <span class="cc-muted">(estimate)</span></h4>
+      <h4>Race forecast <span class="cc-muted">(expected production)</span></h4>
+      <p class="cc-note">Planning estimate, not win odds. Dice variation, hidden cards and incomplete hand tracking can change the race.</p>
       <table class="cc-wtable">${rows}</table>`;
   }
 
