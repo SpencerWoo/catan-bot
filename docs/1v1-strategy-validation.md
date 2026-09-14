@@ -42,3 +42,10 @@ The audit also identifies reciprocal trade pairs. The August 22 19:01:01 loss tr
 Main-game bank trades now require that the selected build can be completely funded. Its target stays fixed across the trade sequence, while a newly available immediate win can still take precedence. Otherwise the bot keeps the cards, retaining its option to trade later instead of paying a guaranteed loss merely to get below the discard limit. Regression tests cover holding an over-limit wheat hand for an unfunded city and completing a two-trade purchase without exchanging acquired cards back.
 
 The panel has been visually reordered: play checkbox, board and plan, player hands, balanced dice, evaluation, strategy, then Rush mode/history/downloads/record. Existing controls and event handlers are retained. The built-bundle smoke test asserts the section order.
+
+## Final verification
+
+- 240 unit tests passed; TypeScript check and production build passed.
+- Both built-bundle smoke checks passed: overlay/control order and exact-hand recovery across steals, reversed delivery, duplicates and reconnect.
+- Firefox lint: zero errors/notices; four dynamic-innerHTML warnings remain.
+- On the validation machine (Node 25), tests used `NODE_OPTIONS=--no-experimental-webstorage` to prevent Node's experimental global storage from shadowing jsdom storage.
