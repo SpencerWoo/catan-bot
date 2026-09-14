@@ -98,3 +98,7 @@ The panel now displays expected turns to finish instead of percentages such as
 hidden cards, opponent decisions and incomplete capture still limit its accuracy.
 These replay checks establish corrected decisions, not hypothetical wins or a
 measured win-rate improvement.
+
+Validation for v1.20: 250 tests passed; TypeScript, production build and both
+built-bundle smoke checks passed. Firefox lint reports zero errors/notices and
+four existing dynamic-innerHTML warnings. No new live games were played.
