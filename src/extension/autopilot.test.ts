@@ -439,7 +439,7 @@ describe("risk profile and opponent weakness", () => {
     expect(d?.describe).toContain("save for");
   });
 
-  
+
 });
 
 describe("autopilot decisions", () => {
@@ -576,7 +576,7 @@ describe("autopilot decisions", () => {
     expect(d?.trade?.get).toBe("ore");
   });
 
-  
+
 
   it("does not buy a dev card when the bank is sold out", () => {
     const t = trackerWith({ ore: 1, sheep: 1, wheat: 1 });
@@ -615,7 +615,7 @@ describe("autopilot decisions", () => {
     expect(d?.describe).toContain("planned Largest Army");
   });
 
-  
+
 
   it("STOPS playing knights once it holds Largest Army (discipline)", () => {
     const t = trackerWith({});
@@ -635,7 +635,7 @@ describe("autopilot decisions", () => {
     expect(d?.kind).not.toBe("play-knight"); // hold the extra knights
   });
 
-  
+
 
   it("plays knights to STEAL a win-critical Largest Army race", () => {
     const t = trackerWith({});
@@ -1122,7 +1122,7 @@ describe("autopilot decisions", () => {
     expect(d?.kind).toBe("build-city");
   });
 
-  
+
 
   it("VP cards reduce the actual gap without a phase threshold", () => {
     // 11 public + 2 VP cards = 13 of 15 -> endgame: trade toward the step at any hand size
@@ -1419,7 +1419,7 @@ describe("autopilot decisions", () => {
     expect(decideNext({ ...base, fit: roadExpand })?.kind).toBe("play-knight");
   });
 
-  
+
 
   it("plays a held knight for a planned army, independently of generic dev-card count", () => {
     const t = trackerWith({});
@@ -1443,7 +1443,7 @@ describe("autopilot decisions", () => {
     expect(d?.describe).toMatch(/planned Largest Army/i);
   });
 
-  
+
 
   it("executor plays a learned knight once per turn and not the turn it's bought", () => {
     localStorage.clear();
@@ -1914,9 +1914,9 @@ describe("forced discards", () => {
 });
 
 describe("strategy upgrades (dice shoe, monopoly defense, robber blocking)", () => {
-  
 
-  
+
+
 
   it("blocks the number likeliest to roll next (balanced-dice due-ness)", () => {
     const t = createTracker("Nick");
