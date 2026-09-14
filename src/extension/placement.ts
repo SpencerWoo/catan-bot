@@ -180,8 +180,8 @@ export function placementWeights(board: Board): Record<Resource, number> {
  * a 4p loss opened on 10- and 11-pip brick/sheep corners with no wheat or
  * wood at all, then burned 48 cards in 4:1 trades.)
  */
-// Cities are the 1v1 engine (3 ranked losses: 1-0-3 cities vs 3-2-4, all
-// ore-light) — value ore/wheat coverage above wood/brick, sheep least.
+// Resource usefulness comes from coverage and first-build timing rather than
+// a blanket ore/wheat preference.
 const SETUP_NEED: Record<Resource, number> = { wheat: 1, ore: 1, wood: 1, brick: 1, sheep: 1 };
 
 /**
@@ -211,10 +211,8 @@ export function rankSetupSpots(
   limit = 3,
 ) {
   const existing = playerProduction(state, youPlayer); // cards/roll
-  // Robber-vulnerability: pips grouped by NUMBER TOKEN across the whole
-  // network. If most of your income rides on one token, a single robber
-  // placement shuts your economy down — candidates that push the top-token
-  // share higher get penalized.
+  // Shared numbers correlate income. Shared-hex robber exposure is evaluated
+  // separately below; two tiles with the same number are not one robber target.
   const netPipsByToken = new Map<number, number>();
   const haveBuildings = state.buildings.some((b) => b.player === youPlayer);
   for (const b of state.buildings) {

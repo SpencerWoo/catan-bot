@@ -34,3 +34,11 @@ Completion times use resource-specific production, holdings, trade ratios, verif
 The evaluator remains a bounded expected-value planner: it retains 24 candidate portfolios, searches Longest Road up to three added roads, and uses base-deck expectations for hidden opponent VP and future dev draws. It is not an exhaustive stochastic game solver or a calibrated win-probability model. Future production and trades are fractional expectations; executable trades still require whole cards. With no credible finite finish found, the growth valuation uses a provisional horizon instead of claiming a player is eliminated.
 
 No live extension installation or new games were performed during this implementation.
+
+## Follow-up: reciprocal bank trades and panel order
+
+The audit also identifies reciprocal trade pairs. The August 22 19:01:01 loss traded three ore for wheat, then three wheat for ore with only an own roll recorded between them. The August 22 20:17:15 win traded four sheep for wood, then four wood for sheep with no intervening own action. These mistakes also occur in wins; retaining wins in the audit prevents treating all winning actions as good policy.
+
+Main-game bank trades now require that the selected build can be completely funded. Its target stays fixed across the trade sequence, while a newly available immediate win can still take precedence. Otherwise the bot keeps the cards, retaining its option to trade later instead of paying a guaranteed loss merely to get below the discard limit. Regression tests cover holding an over-limit wheat hand for an unfunded city and completing a two-trade purchase without exchanging acquired cards back.
+
+The panel has been visually reordered: play checkbox, board and plan, player hands, balanced dice, evaluation, strategy, then Rush mode/history/downloads/record. Existing controls and event handlers are retained. The built-bundle smoke test asserts the section order.

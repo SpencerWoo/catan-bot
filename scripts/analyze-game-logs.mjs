@@ -8,9 +8,23 @@ const reports = logs.map((g, index) => {
   const firstCity = mine.findIndex((m) => m.text === 'built a city');
   const you = g.finalPlayers.find((p) => p.isYou);
   const opponent = g.finalPlayers.find((p) => !p.isYou);
+  let previousTrade = null;
+  let betweenTrades = [];
+  const reciprocalTrades = [];
+  for (const move of mine) {
+    const trade = /bank-traded — gave (\d+) (\w+), got (\d+) (\w+)/.exec(move.text);
+    if (trade) {
+      if (previousTrade?.give === trade[4] && previousTrade?.get === trade[2]) {
+        reciprocalTrades.push({ first: previousTrade.text, second: move.text, between: betweenTrades });
+      }
+      previousTrade = { give: trade[2], get: trade[4], text: move.text };
+      betweenTrades = [];
+    } else if (previousTrade) betweenTrades.push(move.text);
+  }
   const missingSetup = mine.filter((m) => m.text === 'placed a settlement').length < 2;
   const incomplete = g.complete === false || !g.winner || missingSetup;
   return { index, at: g.at, won: g.won, incomplete,
+    reciprocalTrades,
     replayable: !!g.boardGeometry && !!g.decisions?.some((d) => d.planningInputs && d.position),
     productionPips: [you?.pips, opponent?.pips],
     devBuys: mine.filter((m) => m.text === 'bought a development card').length,

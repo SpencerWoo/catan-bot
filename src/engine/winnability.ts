@@ -2,21 +2,11 @@ import { RESOURCES, Resource } from "./types";
 import { turnsToAfford } from "./horizon";
 
 /**
- * Win-probability & path-to-victory model.
- *
- * For each player we work out the CHEAPEST plan that still reaches the VP
- * target, honouring the hard constraints of a real game:
- *   - pieces left in supply (0 cities → can't upgrade; 0 settlements → can't
- *     expand; 0 roads → can't chase Longest Road),
- *   - Largest Army / Longest Road are only VP sources you can still take from
- *     whoever holds them (and only if the dev deck / your roads can supply it),
- *   - Victory-Point dev cards as a slow fallback while the deck has cards.
- *
- * From that plan we estimate turns-to-win (cards still needed ÷ production,
- * penalising resources you don't produce) and turn the field of turn-counts
- * into probabilities with a softmax. Everything here is a documented heuristic
- * — it is an ESTIMATE, not a solver — but it respects what is actually
- * possible, so "eliminated" and "needs a road + settlement" are real.
+ * Bounded resource-specific completion planner. Candidate portfolios respect
+ * pieces, legal expansion routes and bonus ownership; successive investments
+ * add production as they are financed. A softmax compares the resulting times
+ * as a heuristic race estimate, not a calibrated probability or exact solver.
+ * No route found means unverified, not proof that victory is impossible.
  */
 
 export type Hand = Record<Resource, number>;
@@ -99,7 +89,7 @@ export interface VictoryPlan {
   isYou: boolean;
   publicVp: number;
   target: number;
-  /** true = cannot reach the target with anything still available */
+  /** No feasible completion portfolio was found within the bounded search. */
   eliminated: boolean;
   steps: VictoryStep[];
   planVp: number;
