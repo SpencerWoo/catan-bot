@@ -500,7 +500,7 @@ export class Overlay {
 
     // Position eval (chess-style): who is ahead and why, recomputed every turn.
     const evalHtml = this.renderEval(state, bridge ?? null);
-    if (evalHtml) parts.push(evalHtml);
+    let moveHtml = "";
 
     if (you && fits.length > 0) {
       let facts: PlacementFacts | null = null;
@@ -514,14 +514,16 @@ export class Overlay {
       const inSetup = advice?.phase === "setup" || state.rolls.length === 0;
       if (!inSetup) {
         const top = planning?.builds[0];
-        parts.push(this.renderYourMove(top ? [{ primary: true,
-          text: `${top.wait === 0 ? "Fund" : "Save for"} ${top.kind}${top.vertexId !== undefined ? ` at intersection ${top.vertexId}` : ""} — ~${top.wait.toFixed(1)} turns to fund; race horizon ~${planning!.horizon.turns.toFixed(1)} turns.` }] : nextMoves(state, you, fits[0], facts)));
+        moveHtml = this.renderYourMove(top ? [{ primary: true,
+          text: `${top.wait === 0 ? "Fund" : "Save for"} ${top.kind}${top.vertexId !== undefined ? ` at intersection ${top.vertexId}` : ""} — ~${top.wait.toFixed(1)} turns to fund; race horizon ~${planning!.horizon.turns.toFixed(1)} turns.` }] : nextMoves(state, you, fits[0], facts));
       }
     }
 
     parts.push(this.renderWhereToBuild(bridge ?? null, gs, advice));
-    parts.push(this.renderDeck(deckStatus(state), state));
+    if (moveHtml) parts.push(moveHtml);
     parts.push(this.renderPlayers(state));
+    parts.push(this.renderDeck(deckStatus(state), state));
+    if (evalHtml) parts.push(evalHtml);
     parts.push(this.renderWinChances());
 
     if (you && fits.length > 0) {
@@ -543,17 +545,15 @@ export class Overlay {
       );
     }
     if (state.gameOver) {
-      parts.unshift(`<p class="cc-note"><strong>${esc(state.gameOver)}</strong> won the game.</p>`);
+      parts.push(`<p class="cc-note"><strong>${esc(state.gameOver)}</strong> won the game.</p>`);
     }
     if (this.hooks.needsRefresh?.()) {
-      parts.unshift(
+      parts.push(
         `<p class="cc-note" style="color:var(--brick);font-weight:600">⟳ Reload this tab! The game socket isn't captured — exact hands, the board map and full autopilot need it. (Colonist resends everything on refresh.)</p>`,
       );
     }
 
-    parts.push(this.renderHistory());
-    // Autopilot goes at the TOP (below any reload/game-over notice): the
-    // play-for-me switch is the most-used control.
+    parts.push(this.renderRush(), this.renderHistory(), this.renderAfterGame());
     parts.unshift(this.renderAutopilot());
     this.body.innerHTML = parts.join("");
   }
@@ -581,15 +581,19 @@ export class Overlay {
   private renderAutopilot(): string {
     const ap = this.hooks.getAutopilotView?.();
     if (!ap) return "";
-    const captured = this.hooks.captureCount?.() ?? 0;
     return `
       <h4>Autopilot</h4>
       <p class="cc-note">
         <label><input type="checkbox" data-act="toggle-autopilot" ${ap.enabled ? "checked" : ""}/>
         <strong>Play my turns</strong></label>
         <span class="cc-muted"> — ${esc(ap.note)}</span>
-      </p>
-      ${this.renderRush()}
+      </p>`;
+  }
+
+  private renderAfterGame(): string {
+    if (!this.hooks.getAutopilotView?.()) return "";
+    const captured = this.hooks.captureCount?.() ?? 0;
+    return `
       <p class="cc-note cc-muted">Plays your turn through colonist's own protocol: rolls, builds
       settlements, roads and cities (setup and mid-game), buys dev cards, bank-trades toward builds,
       plays knights and monopolies, moves the robber and steals, discards on a 7, ends the turn.

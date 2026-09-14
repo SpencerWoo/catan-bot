@@ -32,6 +32,8 @@ export interface AutopilotDecision {
   cards?: Partial<Record<Resource, number>>;
   /** for "bank-trade": give `giveCount` of `give` to get one `get` */
   trade?: { give: Resource; get: Resource; giveCount: number };
+  /** Keep a sequence of bank trades committed to the build it can fund now. */
+  funding?: { kind: BuildEvaluation["kind"]; vertexId?: number };
   /** for "play-monopoly": the resource to steal from everyone */
   resource?: Resource;
   /** for "play-year-of-plenty": the two resources to take from the bank */
@@ -593,6 +595,7 @@ export function decideNext(opts: {
   /** victory points to win (colonist: 10; casual 1v1: 15). Default 10. */
   winTarget?: number;
   planning?: PlanningContext;
+  funding?: AutopilotDecision["funding"];
   /** Victory Point dev cards we hold (exact, from card ids) — count toward the target */
   vpCardsHeld?: number;
   /** player trading is possible (3+ players; colonist 1v1 has none) and we may still propose this turn */
@@ -743,14 +746,16 @@ export function decideNext(opts: {
     RESOURCES.every((r) => you.hand[r] >= ((COSTS[item][r] as number | undefined) ?? 0));
 
   const choices = planning.builds.filter((b) => canBuild(b.kind));
-  const top = choices[0];
+  const funded = opts.funding ? choices.find((b) => b.kind === opts.funding!.kind && b.vertexId === opts.funding!.vertexId &&
+    affordableWithTrades(you.hand, you.bankRatio, b.cost)) : undefined;
+  const top = funded ?? choices[0];
   const evaluation = { horizon: planning.horizon.turns, gap: planning.gap,
     alternatives: choices.slice(0, 8).map((b) => ({ kind: b.kind, score: b.score, wait: b.wait, vertexId: b.vertexId })) };
   const finish = (decision: AutopilotDecision): AutopilotDecision => ({ ...decision, evaluation });
   const build = (choice: BuildEvaluation): AutopilotDecision | null => {
     if (!affordableWithTrades(you.hand, you.bankRatio, choice.cost)) return null;
     const trade = tradeTowardCost(you.hand, you.bankRatio, choice.cost, planning.weights);
-    if (trade && allowed("bank-trade")) return { kind: "bank-trade", trade,
+    if (trade && allowed("bank-trade")) return { kind: "bank-trade", trade, funding: { kind: choice.kind, vertexId: choice.vertexId },
       describe: `bank-trade ${trade.giveCount} ${trade.give} for ${trade.get} to fund ${choice.kind}` };
     if (trade) return null;
     if (choice.kind === "dev") return afford("dev") && allowed("buy-dev")
@@ -848,17 +853,10 @@ export function decideNext(opts: {
       if (coord) return finish({ kind: "build-road", coord,
         describe: `road toward planned ${top.kind}, completable within the remaining game` });
     }
-    // Save for the best investment. Partial trades must improve its completion
-    // time and preserve the resources already reserved for it.
-    if (allowed("bank-trade")) {
-      const trade = tradeTowardCost(you.hand, you.bankRatio, top.cost, planning.weights);
-      if (trade) {
-        const hand = { ...you.hand }; hand[trade.give] -= trade.giveCount; hand[trade.get]++;
-        const after = turnsToAfford(top.cost, hand, planning.production, you.bankRatio);
-        if (after + 1e-6 < top.wait || (handSize > limit && RESOURCES.reduce((s, r) => s + hand[r], 0) < handSize)) return finish({ kind: "bank-trade", trade,
-          describe: `bank-trade ${trade.giveCount} ${trade.give} for ${trade.get} to reach ${top.kind} sooner` });
-      }
-    }
+    // Keep cards until the chosen investment is fundable. Trading surplus
+    // early cannot beat the option to make that same trade later, and a
+    // possible discard is not a reason to guarantee conversion losses.
+
   }
   if (opts.canProposeTrade && top && allowed("propose-trade")) {
     const offer = proposeTrade(you.hand, [top.cost], planning.weights, { alreadyAsked: opts.askedThisTurn, handLimit: limit });
@@ -897,6 +895,7 @@ export class Autopilot {
   private devsBoughtThisTurn = 0;
   /** free roads still owed after playing Road Building */
   private freeRoads = 0;
+  private funding: AutopilotDecision["funding"];
   /** trade offer ids we've already answered this game */
   private answeredOffers = new Set<string>();
   /** resources we've asked for in proposals this turn (max 2 proposals) */
@@ -962,6 +961,7 @@ export class Autopilot {
       this.devPlayedThisTurn = false;
       this.devsBoughtThisTurn = 0;
       this.freeRoads = 0;
+      this.funding = undefined;
       this.askedThisTurn = [];
       this.domFailed.clear();
     }
@@ -990,6 +990,7 @@ export class Autopilot {
     if (kind === "propose-trade" && this.lastAsked) this.askedThisTurn.push(this.lastAsked);
     if (kind === "build-road" && this.freeRoads > 0) this.freeRoads--;
     if (kind === "buy-dev") this.devsBoughtThisTurn++;
+    if (kind === "end-turn" || (this.funding && kind === (this.funding.kind === "dev" ? "buy-dev" : `build-${this.funding.kind}`))) this.funding = undefined;
   }
 
   /** A non-knight dev card was played manually (YoP, Monopoly, Road Building). */
@@ -1136,6 +1137,7 @@ export class Autopilot {
       canRob: ctx.canRob,
       winTarget: ctx.winTarget,
       planning: ctx.planning,
+      funding: this.funding,
       vpCardsHeld,
       canProposeTrade: (ctx.playerCount ?? 2) >= 3 && this.askedThisTurn.length < 2,
       askedThisTurn: this.askedThisTurn,
@@ -1175,6 +1177,7 @@ export class Autopilot {
     // robber, end turn) — reverse-engineered from the protocol, works for
     // placements too.
     if (this.dispatch(decision)) {
+      if (decision.funding) this.funding = decision.funding;
       this.pending = { kind: decision.kind, t: now, via: "ws" };
       this.note = `acting: ${decision.describe}`;
       return;

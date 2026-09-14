@@ -3089,7 +3089,8 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
     const canBuild = (item) => item === "dev" ? devAvailable : hasPiece(item) && allowed(item === "city" ? "build-city" : item === "road" ? "build-road" : "build-settlement");
     const afford = (item) => RESOURCES.every((r) => you.hand[r] >= (COSTS[item][r] ?? 0));
     const choices = planning.builds.filter((b) => canBuild(b.kind));
-    const top = choices[0];
+    const funded = opts.funding ? choices.find((b) => b.kind === opts.funding.kind && b.vertexId === opts.funding.vertexId && affordableWithTrades(you.hand, you.bankRatio, b.cost)) : void 0;
+    const top = funded ?? choices[0];
     const evaluation = {
       horizon: planning.horizon.turns,
       gap: planning.gap,
@@ -3103,6 +3104,7 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
       if (trade && allowed("bank-trade")) return {
         kind: "bank-trade",
         trade,
+        funding: { kind: choice.kind, vertexId: choice.vertexId },
         describe: `bank-trade ${trade.giveCount} ${trade.give} for ${trade.get} to fund ${choice.kind}`
       };
       if (trade) return null;
@@ -3201,20 +3203,6 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
           describe: `road toward planned ${top.kind}, completable within the remaining game`
         });
       }
-      if (allowed("bank-trade")) {
-        const trade = tradeTowardCost(you.hand, you.bankRatio, top.cost, planning.weights);
-        if (trade) {
-          const hand = { ...you.hand };
-          hand[trade.give] -= trade.giveCount;
-          hand[trade.get]++;
-          const after = turnsToAfford(top.cost, hand, planning.production, you.bankRatio);
-          if (after + 1e-6 < top.wait || handSize > limit && RESOURCES.reduce((s, r) => s + hand[r], 0) < handSize) return finish({
-            kind: "bank-trade",
-            trade,
-            describe: `bank-trade ${trade.giveCount} ${trade.give} for ${trade.get} to reach ${top.kind} sooner`
-          });
-        }
-      }
     }
     if (opts.canProposeTrade && top && allowed("propose-trade")) {
       const offer = proposeTrade(you.hand, [top.cost], planning.weights, { alreadyAsked: opts.askedThisTurn, handLimit: limit });
@@ -3238,6 +3226,7 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
       __publicField(this, "devsBoughtThisTurn", 0);
       /** free roads still owed after playing Road Building */
       __publicField(this, "freeRoads", 0);
+      __publicField(this, "funding");
       /** trade offer ids we've already answered this game */
       __publicField(this, "answeredOffers", /* @__PURE__ */ new Set());
       /** resources we've asked for in proposals this turn (max 2 proposals) */
@@ -3288,6 +3277,7 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
         this.devPlayedThisTurn = false;
         this.devsBoughtThisTurn = 0;
         this.freeRoads = 0;
+        this.funding = void 0;
         this.askedThisTurn = [];
         this.domFailed.clear();
       }
@@ -3311,6 +3301,7 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
       if (kind === "propose-trade" && this.lastAsked) this.askedThisTurn.push(this.lastAsked);
       if (kind === "build-road" && this.freeRoads > 0) this.freeRoads--;
       if (kind === "buy-dev") this.devsBoughtThisTurn++;
+      if (kind === "end-turn" || this.funding && kind === (this.funding.kind === "dev" ? "buy-dev" : `build-${this.funding.kind}`)) this.funding = void 0;
     }
     /** A non-knight dev card was played manually (YoP, Monopoly, Road Building). */
     markDevPlayed() {
@@ -3403,6 +3394,7 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
         canRob: ctx.canRob,
         winTarget: ctx.winTarget,
         planning: ctx.planning,
+        funding: this.funding,
         vpCardsHeld,
         canProposeTrade: (ctx.playerCount ?? 2) >= 3 && this.askedThisTurn.length < 2,
         askedThisTurn: this.askedThisTurn
@@ -3431,6 +3423,7 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
         return;
       }
       if (this.dispatch(decision)) {
+        if (decision.funding) this.funding = decision.funding;
         this.pending = { kind: decision.kind, t: now, via: "ws" };
         this.note = `acting: ${decision.describe}`;
         return;
@@ -3950,7 +3943,7 @@ html.cc-docked-page {
       const you = state.youName;
       const fits = you && state.players.has(you) ? rankLiveStrategies(state, you, strategyPriors(loadRecords())) : [];
       const evalHtml = this.renderEval(state, bridge2 ?? null);
-      if (evalHtml) parts.push(evalHtml);
+      let moveHtml = "";
       if (you && fits.length > 0) {
         let facts = null;
         if (gs && gs.youPlayer !== null) {
@@ -3959,15 +3952,17 @@ html.cc-docked-page {
         const inSetup = (advice == null ? void 0 : advice.phase) === "setup" || state.rolls.length === 0;
         if (!inSetup) {
           const top = planning == null ? void 0 : planning.builds[0];
-          parts.push(this.renderYourMove(top ? [{
+          moveHtml = this.renderYourMove(top ? [{
             primary: true,
             text: `${top.wait === 0 ? "Fund" : "Save for"} ${top.kind}${top.vertexId !== void 0 ? ` at intersection ${top.vertexId}` : ""} — ~${top.wait.toFixed(1)} turns to fund; race horizon ~${planning.horizon.turns.toFixed(1)} turns.`
-          }] : nextMoves(state, you, fits[0], facts)));
+          }] : nextMoves(state, you, fits[0], facts));
         }
       }
       parts.push(this.renderWhereToBuild(bridge2 ?? null, gs, advice));
-      parts.push(this.renderDeck(deckStatus(state), state));
+      if (moveHtml) parts.push(moveHtml);
       parts.push(this.renderPlayers(state));
+      parts.push(this.renderDeck(deckStatus(state), state));
+      if (evalHtml) parts.push(evalHtml);
       parts.push(this.renderWinChances());
       if (you && fits.length > 0) {
         if (planning) {
@@ -3995,14 +3990,14 @@ html.cc-docked-page {
         );
       }
       if (state.gameOver) {
-        parts.unshift(`<p class="cc-note"><strong>${esc(state.gameOver)}</strong> won the game.</p>`);
+        parts.push(`<p class="cc-note"><strong>${esc(state.gameOver)}</strong> won the game.</p>`);
       }
       if ((_d = (_c = this.hooks).needsRefresh) == null ? void 0 : _d.call(_c)) {
-        parts.unshift(
+        parts.push(
           `<p class="cc-note" style="color:var(--brick);font-weight:600">⟳ Reload this tab! The game socket isn't captured — exact hands, the board map and full autopilot need it. (Colonist resends everything on refresh.)</p>`
         );
       }
-      parts.push(this.renderHistory());
+      parts.push(this.renderRush(), this.renderHistory(), this.renderAfterGame());
       parts.unshift(this.renderAutopilot());
       this.body.innerHTML = parts.join("");
     }
@@ -4021,18 +4016,22 @@ html.cc-docked-page {
       <div class="cc-hist">${rows}</div>`;
     }
     renderAutopilot() {
-      var _a, _b, _c, _d;
+      var _a, _b;
       const ap = (_b = (_a = this.hooks).getAutopilotView) == null ? void 0 : _b.call(_a);
       if (!ap) return "";
-      const captured = ((_d = (_c = this.hooks).captureCount) == null ? void 0 : _d.call(_c)) ?? 0;
       return `
       <h4>Autopilot</h4>
       <p class="cc-note">
         <label><input type="checkbox" data-act="toggle-autopilot" ${ap.enabled ? "checked" : ""}/>
         <strong>Play my turns</strong></label>
         <span class="cc-muted"> — ${esc(ap.note)}</span>
-      </p>
-      ${this.renderRush()}
+      </p>`;
+    }
+    renderAfterGame() {
+      var _a, _b, _c, _d;
+      if (!((_b = (_a = this.hooks).getAutopilotView) == null ? void 0 : _b.call(_a))) return "";
+      const captured = ((_d = (_c = this.hooks).captureCount) == null ? void 0 : _d.call(_c)) ?? 0;
+      return `
       <p class="cc-note cc-muted">Plays your turn through colonist's own protocol: rolls, builds
       settlements, roads and cities (setup and mid-game), buys dev cards, bank-trades toward builds,
       plays knights and monopolies, moves the robber and steals, discards on a 7, ends the turn.

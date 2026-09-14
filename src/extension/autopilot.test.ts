@@ -1093,7 +1093,7 @@ describe("autopilot decisions", () => {
     expect(board.vertices[M].hexIds.some((id) => board.hexes[id].kind === "wheat")).toBe(true);
   });
 
-  it("near the discard limit, trades surplus toward a city it can't finish this turn", () => {
+  it("accepts discard risk while saving for a city it cannot finish this turn", () => {
     // 11 cards of wood/sheep, one settlement to upgrade, a city 5 cards away:
     // not completable with trades this turn, but sitting on it just feeds 7s.
     const t = trackerWith({ wood: 6, sheep: 5 }, false);
@@ -1101,9 +1101,8 @@ describe("autopilot decisions", () => {
     const d = decideNext({
       tracker: t, youName: "Nick", fit: fits[0], gs: gsWithSettlement(), advice: null, rolledThisTurn: true,
     });
-    expect(d?.kind).toBe("bank-trade");
-    expect(["ore", "wheat"]).toContain(d?.trade?.get); // progress toward the city
-    expect(d?.describe).toContain("city sooner");
+    expect(d?.kind).toBe("end-turn");
+    expect(d?.describe).toContain("save for city");
   });
 
   it("endgame steering: builds the win-model's step first", () => {
@@ -1815,7 +1814,7 @@ describe("forced discards", () => {
     expect(ap.discardPending).toBe(false);
   });
 
-  it("spends an over-limit hand down rather than ending the turn", () => {
+  it("does not trade solely to reduce an over-limit hand", () => {
     const t = trackerWith({ wood: 4, brick: 3, ore: 1, sheep: 1, wheat: 1 }); // 10 cards
     const fits = rankLiveStrategies(t, "Nick");
     const roadExpand = fits.find((f) => f.strategy.id === "road-expand")!;
@@ -1827,8 +1826,8 @@ describe("forced discards", () => {
       advice: null,
       rolledThisTurn: true,
     });
-    expect(d?.kind).toBe("bank-trade"); // dev isn't in road-expand's build order
-    expect(d?.trade?.giveCount).toBeGreaterThan(1);
+    expect(d?.kind).toBe("end-turn");
+    expect(d?.describe).toContain("save for");
   });
 
   it("bank-trades a lopsided over-limit hand toward the next build", () => {

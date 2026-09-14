@@ -49,3 +49,42 @@ describe("race decisions", () => {
     expect(choose(0, 2)).toEqual({ x: ore.q, y: ore.r });
   });
 });
+
+describe("bank trade commitment", () => {
+  it("holds an over-limit hand instead of paying a certain loss for an unfunded city", () => {
+    const t = players(), us = t.players.get("Us")!;
+    us.hand = { ...zeroHand(), wheat: 6, wood: 2 };
+    us.bankRatio = { wheat: 3, ore: 3 };
+    const board = generateBoard(42);
+    const gs = { state: { board, buildings: [{ player: 0 as const, vertexId: 0, kind: "settlement" as const }], roads: [] }, youPlayer: 0 as const };
+    const planning = planPosition(t, "Us", gs, { devDeckLeft: 0 });
+    planning.builds = planning.builds.filter((b) => b.kind === "city");
+    const decision = decideNext({ tracker: t, youName: "Us", fit: rankLiveStrategies(t, "Us")[0], gs, advice: null,
+      rolledThisTurn: true, discardLimit: 7, planning });
+    expect(decision?.kind).toBe("end-turn");
+    expect(us.hand.wheat).toBe(6);
+  });
+
+  it("finishes a multi-trade purchase without exchanging the acquired cards back", () => {
+    const t = players(), us = t.players.get("Us")!;
+    us.hand = { ...zeroHand(), sheep: 7 };
+    us.bankRatio = { sheep: 3, wheat: 3, ore: 3 };
+    let funding: import("./autopilot").AutopilotDecision["funding"];
+    const received = new Set<string>();
+    const actions: string[] = [];
+    for (let i = 0; i < 3; i++) {
+      const decision = decideNext({ tracker: t, youName: "Us", fit: rankLiveStrategies(t, "Us")[0], gs: null, advice: null,
+        rolledThisTurn: true, funding });
+      actions.push(decision!.kind);
+      if (decision?.kind === "bank-trade") {
+        expect(received.has(decision.trade!.give)).toBe(false);
+        expect(decision.funding?.kind).toBe("dev");
+        funding = decision.funding;
+        us.hand[decision.trade!.give] -= decision.trade!.giveCount;
+        us.hand[decision.trade!.get]++;
+        received.add(decision.trade!.get);
+      }
+    }
+    expect(actions).toEqual(["bank-trade", "bank-trade", "buy-dev"]);
+  });
+});
