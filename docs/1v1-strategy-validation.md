@@ -122,3 +122,27 @@ measured win-rate improvement.
 Validation for v1.20: 250 tests passed; TypeScript, production build and both
 built-bundle smoke checks passed. Firefox lint reports zero errors/notices and
 four existing dynamic-innerHTML warnings. No new live games were played.
+
+## Discard-aware spending
+
+The planner now charges an exposed reserve for all expected discarded cards,
+including surplus beyond its preferred build. Seven exposure follows draws
+without replacement and the existing five-card early-refill assumption. The
+pilot compares the hand remaining after a funded purchase, a useful road stage,
+or a partial bank/port trade against holding through the next spending opportunity
+(including the next own roll). Conversion losses and delays to competing builds
+count against spending. Partial trades must serve a productive target and stay
+on that target until purchase or turn end to prevent reverse exchanges. This
+supersedes the earlier blanket prohibition on incomplete bank trades.
+
+The loss estimate uses the current hand, values each lost card at one card unit
+(four cards per planner point), and does not simulate future income or repeated
+discards. It is a bounded decision heuristic, not a prediction of the game result.
+Regression cases cover high/cold seven exposure, refills, multiplayer roll windows,
+threshold and residual losses, useful purchases, partial trades, conversion costs,
+and target retention. Existing recorded-game replays remain observational.
+
+Holding above the limit remains an explicit choice when the investment reward
+outweighs available spending after accounting for risk. A winning hold decision
+is preserved through the pilot fallback and reports the accepted seven exposure;
+a regression protects a high-payoff city reserve even with high seven exposure.
