@@ -128,12 +128,12 @@ export function roadPathTo(
   const takenEdges = new Set(state.roads.map((r) => r.edgeId));
 
   const prev = new Map<number, { vertex: number; edge: number }>();
-  const queue: number[] = [...sources];
+  const queue: number[] = [...sources].filter((v) => !blocked.has(v));
   const seen = new Set(queue);
   while (queue.length) {
     const cur = queue.shift()!;
     if (cur === target) break;
-    if (blocked.has(cur) && !sources.has(cur)) continue;
+    if (blocked.has(cur)) continue;
     for (const n of state.board.vertices[cur].adjacent) {
       if (seen.has(n)) continue;
       const edge = state.board.edges.find(

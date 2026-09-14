@@ -19,6 +19,7 @@ export interface PlanningContext {
 }
 export interface PlanningOptions {
   target?: number;
+  robberHex?: { x: number; y: number } | null;
   devDeckLeft?: number | null;
   hiddenVp?: number;
   knightsInHand?: number;
@@ -129,12 +130,23 @@ export function planPosition(tracker: TrackerState, youName: string,
       cityProduction: gs ? own.filter((b) => b.kind === "settlement").map((b) => vertexIncome(gs.state, b.vertexId, 1)) : undefined,
       bankRatios: p.bankRatio, rollsPerTurn: rolls };
   });
+  const mostKnights = Math.max(0, ...inputs.map((p) => p.knightsPlayed));
+  const mostRoads = Math.max(0, ...inputs.map((p) => p.longestRoadLen));
+  for (const p of inputs) {
+    p.holdsLargestArmy ??= mostKnights >= 3 && p.knightsPlayed === mostKnights && inputs.filter((x) => x.knightsPlayed === mostKnights).length === 1;
+    p.holdsLongestRoad ??= mostRoads >= 5 && p.longestRoadLen === mostRoads && inputs.filter((x) => x.longestRoadLen === mostRoads).length === 1;
+  }
   const victories = analyzeVictory(inputs, { target, devDeckLeft: opts.devDeckLeft ?? null });
   const horizon = gameHorizon(victories.map((v) => v.turnsToWin));
   const me = inputs.find((p) => p.isYou)!;
   const victory = victories.find((p) => p.isYou);
+  const paidRoads = new Set<number>();
   const remaining = victory?.steps.reduce<Cost>((cost, step) => {
     for (const r of RESOURCES) cost[r] = (cost[r] ?? 0) + (step.cost[r] ?? 0);
+    for (const id of step.roadEdges ?? []) {
+      if (paidRoads.has(id)) { cost.wood = (cost.wood ?? 0) - 1; cost.brick = (cost.brick ?? 0) - 1; }
+      paidRoads.add(id);
+    }
     return cost;
   }, {}) ?? {};
   const production = Object.fromEntries(RESOURCES.map((r) => [r, me.production[r] * rolls])) as Hand;
@@ -164,7 +176,19 @@ export function planPosition(tracker: TrackerState, youName: string,
     const leader = Math.max(2, ...inputs.map((p) => p.knightsPlayed));
     const needed = Math.max(1, leader + 1 - me.knightsPlayed - (me.knightsInHand ?? 0));
     const armyValue = me.holdsLargestArmy ? 0 : (14 / 25) * 2 / needed * horizon.turns / (horizon.turns + needed);
-    options.push({ kind: "dev", cost: BUILD.dev, vp: 5 / 25 + armyValue, production: zeroHand() });
+    const unblocking = zeroHand();
+    if (opts.robberHex && gs && gs.youPlayer !== null && !opts.knightsInHand) {
+      const hex = gs.state.board.hexes.find((h) => h.q === opts.robberHex!.x && h.r === opts.robberHex!.y);
+      if (hex && hex.kind !== "desert") {
+        const units = gs.state.buildings.filter((b) => b.player === gs.youPlayer && gs.state.board.vertices[b.vertexId].hexIds.includes(hex.id))
+          .reduce((n, b) => n + (b.kind === "city" ? 2 : 1), 0);
+        // A bought knight cannot be played until next turn; a natural seven
+        // may clear the block first. Credit only that temporary recovery.
+        const duration = Math.max(0, Math.min(horizon.turns, 3) - 1);
+        unblocking[hex.kind] = pips(hex.token) / 36 * rolls * units * (14 / 25) * duration / Math.max(1, horizon.turns);
+      }
+    }
+    options.push({ kind: "dev", cost: BUILD.dev, vp: 5 / 25 + armyValue, production: unblocking });
   }
   const builds = evaluateBuilds(options, you.hand, production, you.bankRatio, remaining, gap, horizon);
   const reserve = builds[0]?.cost ?? remaining;

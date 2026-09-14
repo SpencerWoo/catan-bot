@@ -51,8 +51,12 @@ export interface GameLog {
   complete?: boolean;
   events?: Array<{ id: number; event: GameEvent }>;
   decisions?: Array<{ t: number; eventIndex: number; decision: AutopilotDecision;
+    outcome?: { confirmed: boolean; resource: import("../engine/types").Resource; cards: number; eventId: number };
     hands: Array<{ name: string; hand: Hand; total: number | null; health: TrackingHealth; publicVp: number }>;
-    buildings: WireBuilding[]; roads: WireRoad[] }>;
+    buildings: WireBuilding[]; roads: WireRoad[];
+    planningInputs?: import("../engine/winnability").PlayerVictoryInput[];
+    devCardIds?: number[] }>;
+  boardGeometry?: import("../engine/types").Board;
   version: string; // bot build that played this game
   at: string; // ISO end time
   durationMs: number | null;
@@ -101,6 +105,8 @@ export function saveGameLog(log: GameLog): void {
 
 export function gameLogsSummary(logs: GameLog[]): string | null {
   if (logs.length === 0) return null;
-  const wins = logs.filter((l) => l.won).length;
-  return `${logs.length} game${logs.length > 1 ? "s" : ""} logged, ${wins}W-${logs.length - wins}L`;
+  const completed = logs.filter((l) => l.complete !== false && l.winner !== null);
+  const wins = completed.filter((l) => l.won).length;
+  const incomplete = logs.length - completed.length;
+  return `${completed.length} completed, ${wins}W-${completed.length - wins}L${incomplete ? `, ${incomplete} incomplete` : ""}`;
 }

@@ -66,7 +66,8 @@ describe("StateBridge (real capture)", () => {
         },
       },
     });
-    expect(b.publicVp(1)).toBe(7);
+    expect(b.publicVp(1)).toBe(6); // held VP is added separately, once
+    expect(b.publicVp(1)! + 1).toBe(7);
     expect(b.publicVp(2)).toBe(6); // NOT 5 — Largest Army is worth 2
     expect(b.publicVp(3)).toBe(4); // NOT 3 — Longest Road is worth 2
     expect(b.publicVp(4)).toBe(10); // cities are 2 each, not +1

@@ -37,6 +37,14 @@ describe("1v1 conservation ledger", () => {
     for (const { id, event } of ledger.export()) restored.record(id, event);
     expect(restored.project({ mine: hand(), opponentTotal: 4 }).health).toBe("exact");
   });
+  it("replays bilateral trades, spending, discards and dev-card bank flows", () => {
+    const ledger = opening();
+    ledger.record(3, { type: "player-trade", player: "Us", partner: "Them", delta: { wood: -1, ore: 1 } });
+    ledger.record(4, { type: "take-from-bank", player: "Us", resources: { wheat: 1, sheep: 1 } });
+    ledger.record(5, { type: "buy-dev", player: "Us" });
+    ledger.record(6, { type: "discard", player: "Them", resources: { ore: 1 } });
+    expect(ledger.project({ mine: hand(1), opponentTotal: 2 })).toMatchObject({ health: "exact", opponent: hand(1, 1) });
+  });
   it("does not call missing history exact or repair a contradiction by trimming", () => {
     expect(new HandLedger("Us", "Them").project({ mine: hand(), opponentTotal: 10 }).health).toBe("incomplete");
     expect(opening().project({ mine: hand(), opponentTotal: 10 }).opponent).toBeNull();
@@ -52,6 +60,7 @@ describe("Monopoly evidence", () => {
     const them = tracker.players.get("Them")!;
     them.hand = { wood: 10, brick: 0, sheep: 0, wheat: 0, ore: 0 };
     them.serverCards = 10;
+    them.trackingHealth = "exact";
     const decision = decideNext({ tracker, youName: "Us", fit: rankLiveStrategies(tracker, "Us")[0],
       gs: null, advice: null, rolledThisTurn: true, hasMonopoly: true });
     expect(decision?.kind === "play-monopoly" && decision.resource === "ore").toBe(false);

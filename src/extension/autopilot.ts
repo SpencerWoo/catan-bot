@@ -615,7 +615,7 @@ export function decideNext(opts: {
   const limit = opts.discardLimit ?? tracker.discardLimit;
   const handSize = handTotal(you);
   const planning = opts.planning ?? planPosition(tracker, youName, gs, {
-    target: opts.winTarget, hiddenVp: opts.vpCardsHeld, pieces: opts.piecesLeft,
+    target: opts.winTarget, robberHex: opts.robberHex, hiddenVp: opts.vpCardsHeld, pieces: opts.piecesLeft,
     devDeckLeft: opts.bankDevCards, knightsInHand: opts.knightAvailable ? 1 : 0, playableKnights: opts.knightAvailable ? 1 : 0,
   });
 
@@ -649,11 +649,16 @@ export function decideNext(opts: {
     return null; // no useful tile — let the human decide
   }
 
+  const freeRoadChoices = (count: number) => evaluateBuilds(planning.options.filter((b) => b.roadEdges?.length).map((b) => {
+    const free = Math.min(count, b.roadEdges!.length);
+    return { ...b, cost: { ...b.cost, wood: (b.cost.wood ?? 0) - free, brick: (b.cost.brick ?? 0) - free } };
+  }), you.hand, planning.production, you.bankRatio, planning.remaining, planning.gap, planning.horizon);
+
   // Road Building placement: a played card owes the game free roads — it
   // blocks everything else until they're placed. Follow the advised expansion
   // path first; otherwise extend toward the best reachable corner.
   if ((opts.freeRoadsPending ?? 0) > 0 && board && gs && gs.youPlayer !== null) {
-    const advised = (advice?.roadEdges ?? []).find(
+    const advised = (freeRoadChoices(opts.freeRoadsPending!)[0]?.roadEdges ?? advice?.roadEdges ?? []).find(
       (id) => !gs.state.roads.some((r) => r.edgeId === id),
     );
     const edgeId = advised ?? bestFreeRoadEdge(gs.state, gs.youPlayer);
@@ -733,7 +738,7 @@ export function decideNext(opts: {
     return left === null || left > 0;
   };
   const canBuild = (item: keyof typeof COSTS): boolean =>
-    item === "dev" ? devAvailable : hasPiece(item);
+    item === "dev" ? devAvailable : hasPiece(item) && allowed(item === "city" ? "build-city" : item === "road" ? "build-road" : "build-settlement");
 
   const afford = (item: keyof typeof COSTS): boolean =>
     RESOURCES.every((r) => you.hand[r] >= ((COSTS[item][r] as number | undefined) ?? 0));
@@ -741,7 +746,7 @@ export function decideNext(opts: {
   const choices = planning.builds.filter((b) => canBuild(b.kind));
   const top = choices[0];
   const evaluation = { horizon: planning.horizon.turns, gap: planning.gap,
-    alternatives: choices.map((b) => ({ kind: b.kind, score: b.score, wait: b.wait, vertexId: b.vertexId })) };
+    alternatives: choices.slice(0, 8).map((b) => ({ kind: b.kind, score: b.score, wait: b.wait, vertexId: b.vertexId })) };
   const finish = (decision: AutopilotDecision): AutopilotDecision => ({ ...decision, evaluation });
   const build = (choice: BuildEvaluation): AutopilotDecision | null => {
     if (!affordableWithTrades(you.hand, you.bankRatio, choice.cost)) return null;
@@ -787,7 +792,6 @@ export function decideNext(opts: {
     let waitingValue = 0;
     for (const resource of RESOURCES) {
       const haul = confirmedMonopolyHaul(tracker.players.values(), youName, resource);
-      if (haul <= 0) continue;
       const next = { ...you.hand, [resource]: you.hand[resource] + haul };
       let delay = 0;
       let futureHaul = 0;
@@ -808,7 +812,7 @@ export function decideNext(opts: {
       const survival = planning.horizon.turns / (1 + planning.horizon.turns);
       const later = scoreHand({ ...futureHand, [resource]: futureHand[resource] + futureHaul }, laterHorizon) - futureBase;
       waitingValue = Math.max(waitingValue, survival * Math.max(0, later));
-      if (!best || value > best.value) best = { resource, value, haul };
+      if (haul > 0 && (!best || value > best.value)) best = { resource, value, haul };
     }
     if (best && best.value > 0 && best.value + 1e-6 >= waitingValue) return finish({
       kind: "play-monopoly", resource: best.resource,
@@ -826,12 +830,25 @@ export function decideNext(opts: {
     if (best && best.improvement > 0) return finish({ kind: "play-year-of-plenty", resources: best.resources,
       describe: `year of plenty — ${best.resources.join(" + ")} accelerates ${top.kind}` });
   }
-  if (top?.roadEdges?.length && opts.hasRoadBuilding && allowed("play-road-building") && hasPiece("road")) {
-    return finish({ kind: "play-road-building", describe: `free roads toward the planned ${top.kind}` });
+  if (opts.hasRoadBuilding && allowed("play-road-building") && hasPiece("road")) {
+    const free = freeRoadChoices(Math.min(2, pieces?.roads ?? 2))[0];
+    if (free && free.score > (top?.score ?? 0) && free.wait < planning.horizon.turns) {
+      return finish({ kind: "play-road-building", describe: `free roads accelerate the planned ${free.kind}` });
+    }
   }
   if (top) {
     const action = build(top);
     if (action) return finish(action);
+    // Commit affordable road stages only when the complete investment fits
+    // inside the race. This preserves the chosen budget while avoiding a
+    // giant hand held until a multi-road settlement is fully funded.
+    if (top.roadEdges?.length && top.wait < planning.horizon.turns && afford("road") &&
+        allowed("build-road") && hasPiece("road") && gs && board) {
+      const edge = board.edges[top.roadEdges[0]];
+      const coord = pixelsToColonistEdge(board.vertices[edge.a], board.vertices[edge.b]);
+      if (coord) return finish({ kind: "build-road", coord,
+        describe: `road toward planned ${top.kind}, completable within the remaining game` });
+    }
     // Save for the best investment. Partial trades must improve its completion
     // time and preserve the resources already reserved for it.
     if (allowed("bank-trade")) {
@@ -839,7 +856,7 @@ export function decideNext(opts: {
       if (trade) {
         const hand = { ...you.hand }; hand[trade.give] -= trade.giveCount; hand[trade.get]++;
         const after = turnsToAfford(top.cost, hand, planning.production, you.bankRatio);
-        if (after + 1e-6 < top.wait || (handSize > limit && handTotal({ hand } as PlayerState) < handSize)) return finish({ kind: "bank-trade", trade,
+        if (after + 1e-6 < top.wait || (handSize > limit && RESOURCES.reduce((s, r) => s + hand[r], 0) < handSize)) return finish({ kind: "bank-trade", trade,
           describe: `bank-trade ${trade.giveCount} ${trade.give} for ${trade.get} to reach ${top.kind} sooner` });
       }
     }

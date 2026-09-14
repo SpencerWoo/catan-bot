@@ -128,7 +128,7 @@ function scaleCost(c: Cost, k: number): Cost {
 }
 
 /** A single VP "buy" available to a player. */
-interface Buy extends VictoryStep { conflicts?: number[]; }
+interface Buy extends VictoryStep { conflicts?: number[]; requiresSettlement?: number; }
 
 /** Enumerate every VP source still open to a player, cheapest-first per unit. */
 function buysFor(p: PlayerVictoryInput, ctx: WinContext, holdsLA: boolean, holdsLR: boolean, laReach: boolean, lrReach: boolean, knightsToLA: number, roadsToLR: number): Buy[] {
@@ -156,6 +156,9 @@ function buysFor(p: PlayerVictoryInput, ctx: WinContext, holdsLA: boolean, holds
       cost: addCost(BUILD.settlement, scaleCost(BUILD.road, roads)),
       note: roads ? `${roads} road${roads === 1 ? "" : "s"} + settlement` : "settlement on an open spot",
       production: route?.production, vertexId: route?.vertexId, roadEdges: route?.edges, conflicts: route?.conflicts });
+    if (route && (p.citiesLeft ?? 0) > 0) buys.push({ kind: "city", vp: 1,
+      cost: BUILD.city, note: "upgrade the planned settlement to a city",
+      production: route.production, vertexId: route.vertexId, requiresSettlement: route.vertexId });
   }
 
   // Largest Army (+2): only if we can still take it and the deck can supply it.
@@ -199,16 +202,20 @@ function buysFor(p: PlayerVictoryInput, ctx: WinContext, holdsLA: boolean, holds
  */
 function cheapestPlan(buys: Buy[], gap: number, player: PlayerVictoryInput): Buy[] {
   if (gap <= 0) return [];
-  type Candidate = { items: Buy[]; cost: Cost; time: number; roads: number; settlements: number };
+  type Candidate = { items: Buy[]; cost: Cost; time: number; roads: number; settlements: number; cities: number };
   const rate = Object.fromEntries(RESOURCES.map((r) => [r, player.production[r] * (player.rollsPerTurn ?? 2)])) as Hand;
   const dp: Candidate[][] = Array.from({ length: Math.ceil(gap) + 1 }, () => []);
-  dp[0] = [{ items: [], cost: {}, time: 0, roads: 0, settlements: 0 }];
+  dp[0] = [{ items: [], cost: {}, time: 0, roads: 0, settlements: 0, cities: 0 }];
   for (const b of buys) {
     for (let v = dp.length - 2; v >= 0; v--) {
       for (const c of [...dp[v]]) {
-        if (b.vertexId !== undefined && c.items.some((x) => x.vertexId === b.vertexId || x.conflicts?.includes(b.vertexId!))) continue;
+        if (b.requiresSettlement !== undefined && !c.items.some((x) => x.kind === "settlement" && x.vertexId === b.requiresSettlement)) continue;
+        if (b.kind === "settlement" && b.vertexId !== undefined && c.items.some((x) => x.vertexId === b.vertexId || x.conflicts?.includes(b.vertexId!))) continue;
+        const cities = c.cities + (b.kind === "city" ? 1 : 0);
+        if (cities > (player.citiesLeft ?? 0)) continue;
         const settlements = c.settlements + (b.kind === "settlement" ? 1 : 0);
-        if (settlements > (player.settlementsLeft ?? 0)) continue;
+        // Existing city upgrades return settlement pieces before expansion.
+        if (settlements - c.cities > (player.settlementsLeft ?? 0)) continue;
         const edges = new Set(c.items.flatMap((x) => x.roadEdges ?? []));
         const extraRoads = b.roadEdges ? b.roadEdges.filter((id) => !edges.has(id)).length :
           b.kind === "longest-road" ? b.cost.wood ?? 0 : b.kind === "settlement" ? (b.cost.wood ?? 1) - 1 : 0;
@@ -220,7 +227,7 @@ function cheapestPlan(buys: Buy[], gap: number, player: PlayerVictoryInput): Buy
         const delay = Math.max(b.delay ?? 0, ...c.items.map((x) => x.delay ?? 0));
         const time = turnsToAfford(cost, player.hand, rate, player.bankRatios) + delay;
         const nv = Math.min(dp.length - 1, v + b.vp);
-        dp[nv].push({ items: [...c.items, b], cost, time, roads, settlements });
+        dp[nv].push({ items: [...c.items, b], cost, time, roads, settlements, cities });
       }
       // Keep several different resource/route portfolios, not just cheapest cards.
       for (let n = v + 1; n < dp.length; n++) {

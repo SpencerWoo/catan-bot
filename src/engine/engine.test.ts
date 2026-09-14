@@ -103,7 +103,7 @@ describe("analysis", () => {
     expect(total).toBe(boardTotal);
   });
 
-  it("values a 2:1 port fed by this corner's own production", () => {
+  it("does not award a port bonus without a usable surplus and horizon", () => {
     const b = generateBoard(11); // private board — this test mutates a port
     const neutral = Object.fromEntries(RESOURCES.map((r) => [r, 1])) as Record<
       (typeof RESOURCES)[number],
@@ -125,8 +125,8 @@ describe("analysis", () => {
     v.port = null;
     const none = scoreVertex(b, v.id, neutral).score;
 
-    expect(fed).toBeGreaterThan(dry); // a port you can feed beats one you can't
-    expect(dry).toBeGreaterThan(none); // but any 2:1 port still adds value
+    expect(fed).toBe(dry); // ownership alone is not production
+    expect(dry).toBe(none); // contextual trade savings are tested in horizon.test.ts
   });
 
   it("scarce resources get higher weights", () => {

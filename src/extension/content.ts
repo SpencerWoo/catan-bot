@@ -409,7 +409,16 @@ function syncLedger(): void {
     for (const [id, event] of rawEvents) handLedger.record(id, event);
   }
   const ownCards = bridge.state.playerStates?.[String(bridge.myColor)]?.resourceCards?.cards;
-  if (!Array.isArray(ownCards) || ownCards.some((id) => id < 1 || id > 5) || opponent.serverCards === null) return;
+  if (!Array.isArray(ownCards) || ownCards.some((id) => id < 1 || id > 5) || opponent.serverCards === null) {
+    opponent.trackingHealth = "repairing";
+    opponent.trackingReason = "Waiting for a complete private hand and opponent total";
+    return;
+  }
+  if (!rawEvents.has(0) || rawEvents.size !== lastProcessedIndex + 1) {
+    opponent.trackingHealth = historyComplete ? "repairing" : "incomplete";
+    opponent.trackingReason = "Missing log rows; retained history must be completed before claiming an exact hand";
+    return;
+  }
   const mine = tracker.players.get(tracker.youName)!;
   const result = handLedger.project({ mine: { ...mine.hand }, opponentTotal: opponent.serverCards });
   opponent.trackingHealth = result.health;
@@ -420,10 +429,27 @@ function syncLedger(): void {
 
 function recordDecision(decision: AutopilotDecision): void {
   if (!tracker) return;
+  // A resolved Monopoly with no haul log is measurable before our next action.
+  // Never infer it across another player's turn or a tracking fault.
+  const previous = decisionHistory[decisionHistory.length - 1];
+  if (previous?.decision.kind === "play-monopoly" && previous.decision.resource && !previous.outcome) {
+    const between = [...rawEvents].filter(([id]) => id > previous.eventIndex).map(([, event]) => event);
+    const played = between.some((e) => e.type === "use-dev" && e.card === "monopoly" && e.player === tracker!.youName);
+    const opponentTurn = between.some((e) => e.type === "roll" && e.player !== tracker!.youName);
+    const opponent = [...tracker.players.values()].find((p) => p.name !== tracker!.youName);
+    const before = previous.hands.find((p) => p.name === opponent?.name);
+    if (played && !opponentTurn && opponent?.trackingHealth === "exact" && before) {
+      const resource = previous.decision.resource;
+      const cards = before.hand[resource] - opponent.hand[resource];
+      if (cards >= 0) previous.outcome = { confirmed: true, resource, cards, eventId: lastProcessedIndex };
+    }
+  }
   decisionHistory.push({ t: Date.now(), eventIndex: lastProcessedIndex, decision,
     hands: [...tracker.players.values()].map((p) => ({ name: p.name, hand: { ...p.hand }, total: p.serverCards,
       health: p.trackingHealth ?? "incomplete", publicVp: visibleVp(p) })),
     buildings: bridge.buildings, roads: bridge.roads,
+    planningInputs: structuredClone(computePlanning()?.inputs.map(({ settlementRoutes, cityProduction, longestRoadPath, ...input }) => input)),
+    devCardIds: bridge.myDevCardIds(),
   });
 }
 
@@ -441,10 +467,11 @@ function syncTrackerFromState(): void {
     p.serverCards = hand.total;
     p.serverVp = bridge.publicVp(color);
     if (color === myColor) {
-      // our own cards are fully known — replace the estimate outright
-      for (const r of RESOURCES) p.hand[r] = hand.known[r] ?? 0;
-      p.uncertainty = 0;
-      p.trackingHealth = "exact";
+      const cards = bridge.state.playerStates?.[String(color)]?.resourceCards?.cards;
+      const exact = Array.isArray(cards) && cards.every((id) => id >= 1 && id <= 5);
+      if (exact) for (const r of RESOURCES) p.hand[r] = hand.known[r] ?? 0;
+      p.uncertainty = exact ? 0 : 1;
+      p.trackingHealth = exact ? "exact" : "repairing";
     } else {
       // opponents: cards are masked, but the TOTAL is authoritative — pull the
       // log-derived estimate back to it so a missed spend can't linger.
@@ -583,8 +610,8 @@ function computePlanning(): PlanningContext | null {
       bankRatios: bridge.bankRatios(color), rollsPerTurn: tracker.players.size,
       holdsLargestArmy: (bridge.state.playerStates?.[String(color)]?.victoryPointsState?.["3"] ?? 0) > 0,
       holdsLongestRoad: (bridge.state.playerStates?.[String(color)]?.victoryPointsState?.["2"] ?? 0) > 0,
-      knightsInHand: isYou ? countKnightsInHand() : 0,
-      playableKnights: isYou ? countKnightsInHand() : 0,
+      knightsInHand: isYou ? bridge.myDevCardIds().filter((id) => id === 11).length : 0,
+      playableKnights: isYou ? bridge.myDevCardIds().filter((id) => id === 11).length : 0,
       settlementRoutes: gs && pid >= 0 && pid <= 3 ? settlementRoutes(gs.state, pid as PlayerId) : undefined,
     });
   }
@@ -594,7 +621,7 @@ function computePlanning(): PlanningContext | null {
     if (p.playerId === undefined) continue;
     p.longestRoadPath = p.holdsLongestRoad ? null : roadBonusPath(gs.state, p.playerId as PlayerId, targetRoad, p.roadsLeft ?? 0);
   }
-  const value = planPosition(tracker, tracker.youName, gs, { inputs, target: bridge.winTarget, devDeckLeft: bridge.bankDevCards });
+  const value = planPosition(tracker, tracker.youName, gs, { inputs, robberHex: bridge.robberHex, target: bridge.winTarget, devDeckLeft: bridge.bankDevCards });
   planningCache = { revision: planningRevision, value };
   return value;
 }
@@ -702,10 +729,18 @@ function processRow(el: Element): void {
   if (previous && JSON.stringify(previous) === JSON.stringify(ev)) return;
   lastProcessedIndex = Math.max(lastProcessedIndex, idx);
   rawEvents.set(idx, ev);
+  if (!historyComplete && rawEvents.has(0) && rawEvents.size === lastProcessedIndex + 1) {
+    const paid = new Set([...rawEvents.values()].filter((e) => e.type === "starting-resources").map((e) => (e as { player: string }).player));
+    if (paid.size === 2) { historyComplete = true; if (handLedger) handLedger.complete = true; }
+  }
   handLedger?.record(idx, ev);
   if (!previous || previous.type === "ignored") { applyEvent(tracker, ev); recordMove(ev); }
   syncTrackerFromState();
-  try { localStorage.setItem(journalKey(), JSON.stringify({ board: boardKey(), complete: historyComplete, events: [...rawEvents] })); } catch { /* export remains available */ }
+  if (ev.type === "monopoly-steal" && ev.player === tracker.youName) {
+    const action = [...decisionHistory].reverse().find((d) => d.decision.kind === "play-monopoly" && !d.outcome && d.eventIndex < idx);
+    if (action) action.outcome = { confirmed: true, resource: ev.resource, cards: ev.count, eventId: idx };
+  }
+  try { localStorage.setItem(journalKey(), JSON.stringify({ board: boardKey(), complete: historyComplete, events: [...rawEvents], decisions: decisionHistory })); } catch { /* export remains available */ }
 
   // Log-confirmed actions close the learner/autopilot loop for actions that
   // have no dedicated WebSocket event we track.
@@ -740,7 +775,7 @@ function processRow(el: Element): void {
   }
   if (ev.type === "game-over" && !gameRecorded) {
     gameRecorded = true;
-    recordGameEnd(tracker);
+    if (historyComplete) recordGameEnd(tracker);
     saveFullGameLog();
   }
   scheduleRender();
@@ -801,7 +836,8 @@ function saveFullGameLog(): void {
       }));
     })(),
     moves: moveHistory.slice(),
-    complete: historyComplete && tracker.players.size >= 2 && winner !== null,
+    boardGeometry: bridge.board ?? undefined,
+    complete: historyComplete && rawEvents.size === lastProcessedIndex + 1 && tracker.players.size >= 2 && winner !== null,
     events: [...rawEvents].sort(([a], [b]) => a - b).map(([id, event]) => ({ id, event })),
     decisions: decisionHistory.slice(),
   };
@@ -840,6 +876,7 @@ function attach(scroller: HTMLElement): void {
     const saved = JSON.parse(localStorage.getItem(journalKey()) ?? "null");
     if (saved?.board === boardKey() && Array.isArray(saved.events)) {
       historyComplete = saved.complete === true;
+      if (Array.isArray(saved.decisions)) decisionHistory.push(...saved.decisions);
       for (const [id, event] of saved.events as Array<[number, GameEvent]>) {
         rawEvents.set(id, event); applyEvent(tracker, event);
       }

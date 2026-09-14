@@ -52,7 +52,13 @@ export class HandLedger {
         case "build": change(ev.player, BUILD[ev.what], -1); break;
         case "buy-dev": change(ev.player, BUILD.dev, -1); break;
         case "bank-trade": change(ev.player, ev.delta); break;
-        case "player-trade": invalid = true; break; // outside this ledger's 1v1 contract
+        case "player-trade": {
+          const partner = ev.partner ?? (ev.player === this.you ? this.opponent : this.you);
+          if (ev.player === partner) { invalid = true; break; }
+          change(ev.player, ev.delta);
+          change(partner, ev.delta, -1);
+          break;
+        }
         case "steal-known": case "steal-unknown": {
           const thief = ev.thief ?? this.you;
           const victim = ev.victim ?? this.you;
