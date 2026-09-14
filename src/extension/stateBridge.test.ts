@@ -59,9 +59,9 @@ describe("StateBridge (real capture)", () => {
     b.apply(91, {
       diff: {
         playerStates: {
-          "1": { victoryPointsState: { "0": 4, "1": 1, "4": 1 } }, // 4 settlements + 1 city(2) + 1 VP card = 7
+          "1": { victoryPointsState: { "0": 4, "1": 1, "2": 1 } }, // 4 settlements + 1 city(2) + 1 VP card = 7
           "2": { victoryPointsState: { "0": 4, "3": 1 } }, // 4 settlements + Largest Army = 6 (flag stored as 1)
-          "3": { victoryPointsState: { "0": 2, "2": 1 } }, // 2 settlements + Longest Road = 4
+          "3": { victoryPointsState: { "0": 2, "4": 1 } }, // 2 settlements + Longest Road = 4
           "4": { victoryPointsState: { "0": 2, "1": 4 } }, // 2 settlements + 4 cities = 10 (real 15-9 game: we had this + army + 3 VP cards = 15)
         },
       },
