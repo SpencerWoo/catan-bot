@@ -51,11 +51,13 @@ export interface GameLog {
   complete?: boolean;
   events?: Array<{ id: number; event: GameEvent }>;
   decisions?: Array<{ t: number; eventIndex: number; decision: AutopilotDecision;
-    outcome?: { confirmed: boolean; resource: import("../engine/types").Resource; cards: number; eventId: number };
+    outcome?: { confirmed: boolean; resource?: import("../engine/types").Resource; cards?: number; eventId: number };
     hands: Array<{ name: string; hand: Hand; total: number | null; health: TrackingHealth; publicVp: number }>;
     buildings: WireBuilding[]; roads: WireRoad[];
+    position?: Omit<import("../engine/types").GameState, "board">;
     planningInputs?: import("../engine/winnability").PlayerVictoryInput[];
-    devCardIds?: number[] }>;
+    devCardIds?: number[]; bankDevCards?: number | null;
+    robberHex?: { x: number; y: number } | null }>;
   boardGeometry?: import("../engine/types").Board;
   version: string; // bot build that played this game
   at: string; // ISO end time

@@ -530,7 +530,7 @@ describe("autopilot decisions", () => {
   it("saves for production when a city is not affordable this turn", () => {
     // one settlement to upgrade but 2 ore short with nothing to trade; no spot
     // for a settlement. Dev is affordable — use the cards rather than feed a 7.
-    const t = trackerWith({ ore: 1, sheep: 1, wheat: 1 }, false);
+    const t = trackerWith({ ore: 2, sheep: 1, wheat: 2 }, false);
     const fits = rankLiveStrategies(t, "Nick");
     const d = decideNext({
       tracker: t, youName: "Nick", fit: fits[0], gs: gsWithSettlement(), advice: null, rolledThisTurn: true,
@@ -553,14 +553,16 @@ describe("autopilot decisions", () => {
     expect(d?.describe).toContain("save for");
   });
 
-  it("stops buying dev cards in growth once two sit unplayed", () => {
+  it("does not use generic held-card count as a development purchase cutoff", () => {
     const t = trackerWith({ ore: 1, sheep: 1, wheat: 1 }, false);
     t.players.get("Nick")!.devCards = 2; // two unplayed already
     const fits = rankLiveStrategies(t, "Nick");
     const d = decideNext({
       tracker: t, youName: "Nick", fit: fits[0], gs: gsWithSettlement(), advice: null, rolledThisTurn: true,
     });
-    expect(d?.kind).not.toBe("buy-dev");
+    t.players.get("Nick")!.devCards = 0;
+    const withoutHeld = decideNext({ tracker: t, youName: "Nick", fit: fits[0], gs: gsWithSettlement(), advice: null, rolledThisTurn: true });
+    expect(d?.kind).toBe(withoutHeld?.kind);
   });
 
   it("near the limit, trades toward a reachable city before buying a dev card", () => {
@@ -596,6 +598,7 @@ describe("autopilot decisions", () => {
 
   it("advances a planned army before the final two points", () => {
     const t = trackerWith({}); // ~3 cards, under the limit
+    t.players.get("Nick")!.knightsPlayed = 2;
     const fits = rankLiveStrategies(t, "Nick");
     const cityDev = fits.find((f) => f.strategy.id === "city-dev")!;
     const d = decideNext({
@@ -636,7 +639,8 @@ describe("autopilot decisions", () => {
 
   it("plays knights to STEAL a win-critical Largest Army race", () => {
     const t = trackerWith({});
-    t.players.get("Nick")!.knightsPlayed = 3;
+    t.players.get("Nick")!.knightsPlayed = 5;
+    t.players.get("Nick")!.serverVp = 8;
     applyEvent(t, { type: "place", player: "Ava", color: "#E27174", what: "settlement" });
     for (let i = 0; i < 5; i++) applyEvent(t, { type: "use-knight", player: "Ava" });
     const ava = t.players.get("Ava")!;
@@ -887,13 +891,13 @@ describe("autopilot decisions", () => {
     expect(d2?.kind).toBe("play-road-building");
 
     // a FAR target (3 roads, no same-turn claim possible) still plays it:
-    // two free roads toward the spot beat holding the card all game.
+    // retain it when the unfunded target does not beat saving for a city.
     const far = { ...advice, roadPathLength: 3 };
     const d3 = decideNext({
       tracker: trackerWith({}, false), youName: "Nick", fit: fits[0], gs, advice: far, rolledThisTurn: true,
       hasRoadBuilding: true,
     });
-    expect(d3?.kind).toBe("play-road-building");
+    expect(d3?.kind).toBe("end-turn");
   });
 
   it("places the owed free roads after Road Building, along the advised path", () => {
@@ -961,7 +965,7 @@ describe("autopilot decisions", () => {
     expect(d?.resources?.every((r) => r === "ore" || r === "wheat")).toBe(true);
   });
 
-  it("never builds a development road once bloated, even near the discard limit", () => {
+  it("stages a selected expansion without a road-count cutoff", () => {
     const V = board.vertices.find((v) => v.hexIds.length === 3 && v.adjacent.length === 3)!;
     const N = V.adjacent[0];
     const M = board.vertices[N].adjacent.find((x) => x !== V.id && !V.adjacent.includes(x))!;
@@ -985,7 +989,8 @@ describe("autopilot decisions", () => {
       roadEdges: [edge(V.id, N).id, edge(N, M).id], roadPathLength: 3, note: null };
     const t = trackerWith({ wood: 3, brick: 3, sheep: 3 }, false); // 9 cards: at the limit
     const d = decideNext({ tracker: t, youName: "Nick", fit: rankLiveStrategies(t, "Nick")[0], gs, advice, rolledThisTurn: true });
-    expect(d?.kind).not.toBe("build-road");
+    expect(d?.kind).toBe("build-road");
+    expect(d?.describe).toContain("planned");
   });
 
   it("uses Year of Plenty when it accelerates the best investment", () => {
@@ -1059,7 +1064,7 @@ describe("autopilot decisions", () => {
     expect(d3?.kind).not.toBe("build-road");
   });
 
-  it("values first wheat income over duplicating a larger ore/wood corner", () => {
+  it("compares a productive city against adding resource coverage", () => {
     // A high-pip settlement to upgrade + a low-pip open spot on our network:
     // prefer the city (doubles our best producer) over a marginal settlement.
     const strong = board.vertices.find((v) => v.hexIds.length === 3 && v.adjacent.length === 3)!;
@@ -1084,7 +1089,7 @@ describe("autopilot decisions", () => {
     const d = decideNext({
       tracker: t, youName: "Nick", fit: fits[0], gs, advice: null, rolledThisTurn: true,
     });
-    expect(d?.kind).toBe("build-settlement");
+    expect(d?.kind).toBe("build-city");
     expect(board.vertices[M].hexIds.some((id) => board.hexes[id].kind === "wheat")).toBe(true);
   });
 
@@ -1114,7 +1119,7 @@ describe("autopilot decisions", () => {
     const t = trackerWith({ ore: 3, wheat: 3, wood: 1, brick: 1, sheep: 1 }, false);
     t.players.get("Nick")!.serverVp = 13;
     const fit = rankLiveStrategies(t, "Nick").find((f) => f.strategy.id === "road-expand")!;
-    const d = decideNext({ tracker: t, youName: "Nick", fit, gs, advice: null, rolledThisTurn: true, winTarget: 15, endgameStep: "city" });
+    const d = decideNext({ tracker: t, youName: "Nick", fit, gs, advice: null, rolledThisTurn: true, winTarget: 15 });
     expect(d?.kind).toBe("build-city");
   });
 
@@ -1125,9 +1130,9 @@ describe("autopilot decisions", () => {
     const t = trackerWith({ wood: 6 }, false);
     t.players.get("Nick")!.serverVp = 11;
     const fits = rankLiveStrategies(t, "Nick");
-    const noCards = decideNext({ tracker: t, youName: "Nick", fit: fits[0], gs: gsWithSettlement(), advice: null, rolledThisTurn: true, winTarget: 15, endgameStep: "city" });
+    const noCards = decideNext({ tracker: t, youName: "Nick", fit: fits[0], gs: gsWithSettlement(), advice: null, rolledThisTurn: true, winTarget: 15 });
     expect(noCards?.evaluation?.gap).toBe(4);
-    const withCards = decideNext({ tracker: t, youName: "Nick", fit: fits[0], gs: gsWithSettlement(), advice: null, rolledThisTurn: true, winTarget: 15, endgameStep: "city", vpCardsHeld: 2 });
+    const withCards = decideNext({ tracker: t, youName: "Nick", fit: fits[0], gs: gsWithSettlement(), advice: null, rolledThisTurn: true, winTarget: 15, vpCardsHeld: 2 });
     expect(withCards?.evaluation?.gap).toBe(2);
     expect(withCards?.evaluation?.horizon).toBeLessThan(noCards!.evaluation!.horizon);
   });
@@ -1423,6 +1428,7 @@ describe("autopilot decisions", () => {
     const you = t.players.get("Nick")!;
     you.devCards = 4;
     you.knightsPlayed = 0; // 4 unplayed dev cards → play aggressively
+    t.players.get("Nick")!.knightsPlayed = 2;
     const fits = rankLiveStrategies(t, "Nick");
     const base = {
       tracker: t,

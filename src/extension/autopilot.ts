@@ -414,7 +414,8 @@ export function bestRobberHex(
       const before = turnsToAfford(goal, input.hand, rate, input.bankRatios);
       const after = turnsToAfford(goal, input.hand, blocked, input.bankRatios);
       const horizon = planning.horizon.turns + 1;
-      bottleneck += Math.max(0, Math.min(horizon, after) - Math.min(horizon, before)) * 6 / horizon;
+      const delay = Number.isFinite(before) ? Math.max(0, after - before) : 0;
+      bottleneck += Number.isFinite(delay) ? 6 * delay / (horizon + delay) : 6;
     }
     const score = opp - mine * 1.5 + bottleneck;
     if (opp > 0 && (!best || score > best.score)) best = { score, hexId: hex.id };
@@ -591,8 +592,6 @@ export function decideNext(opts: {
   canRob?: (player: PlayerId) => boolean;
   /** victory points to win (colonist: 10; casual 1v1: 15). Default 10. */
   winTarget?: number;
-  /** our cheapest next VP step from the path-to-victory analysis (endgame steering) */
-  endgameStep?: "city" | "settlement" | "dev" | "road";
   planning?: PlanningContext;
   /** Victory Point dev cards we hold (exact, from card ids) — count toward the target */
   vpCardsHeld?: number;
@@ -802,7 +801,7 @@ export function decideNext(opts: {
         const rate = Object.fromEntries(RESOURCES.map((r) => [r, input.production[r] * (input.rollsPerTurn ?? 2)])) as Record<Resource, number>;
         const before = turnsToAfford(goal, opponent.hand, rate, opponent.bankRatio);
         const after = turnsToAfford(goal, { ...opponent.hand, [resource]: 0 }, rate, opponent.bankRatio);
-        delay += Math.max(0, Math.min(planning.horizon.turns + 1, after) - Math.min(planning.horizon.turns + 1, before));
+        delay += Number.isFinite(before) ? Math.min(planning.horizon.turns + 1, Math.max(0, after - before)) : 0;
         const expected = Object.fromEntries(RESOURCES.map((r) => [r, opponent.hand[r] + rate[r]])) as Record<Resource, number>;
         // Expected next-turn spending consumes the very pile we might wait for.
         const spends = affordableWithTrades(expected, opponent.bankRatio, goal);
@@ -1032,8 +1031,6 @@ export class Autopilot {
     tradeOffers?: TradeOffer[];
     /** victory points to win for this game */
     winTarget?: number;
-    /** our cheapest next VP step (from the win-chance model) */
-    endgameStep?: "city" | "settlement" | "dev" | "road";
   planning?: PlanningContext;
     /** number of players at the table (player trading needs 3+) */
     playerCount?: number;
@@ -1138,7 +1135,6 @@ export class Autopilot {
       freeRoadsPending: this.freeRoads,
       canRob: ctx.canRob,
       winTarget: ctx.winTarget,
-      endgameStep: ctx.endgameStep,
       planning: ctx.planning,
       vpCardsHeld,
       canProposeTrade: (ctx.playerCount ?? 2) >= 3 && this.askedThisTurn.length < 2,

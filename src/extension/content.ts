@@ -160,6 +160,10 @@ function rushActive(): boolean {
 /** Confirmations go to whichever pilot is driving this game. */
 function pilotConfirm(kind: Parameters<Autopilot["onConfirm"]>[0]): void {
   (rushActive() ? rushPilot : autopilot).onConfirm(kind);
+  if (kind !== "play-monopoly") {
+    const action = [...decisionHistory].reverse().find((d) => d.decision.kind === kind && !d.outcome);
+    if (action) action.outcome = { confirmed: true, eventId: lastProcessedIndex };
+  }
 }
 
 // "Play my turns" is on by default and remembers the last choice, so a new
@@ -334,7 +338,8 @@ function buildLiveSummary(): unknown {
     pips: Math.round(productionTotal(expectedProduction(p)) * 36),
     devCards: p.devCards,
     knightsPlayed: p.knightsPlayed,
-    hand: p.name === you ? p.hand : undefined, // only our own cards are known
+    hand: p.trackingHealth === "exact" ? p.hand : undefined,
+    trackingHealth: p.trackingHealth ?? "incomplete",
   }));
   const fits = you ? rankLiveStrategies(tracker, you, strategyPriors(loadRecords())) : [];
   const gs = bridge.board ? bridge.toGameState() : null;
@@ -448,8 +453,10 @@ function recordDecision(decision: AutopilotDecision): void {
     hands: [...tracker.players.values()].map((p) => ({ name: p.name, hand: { ...p.hand }, total: p.serverCards,
       health: p.trackingHealth ?? "incomplete", publicVp: visibleVp(p) })),
     buildings: bridge.buildings, roads: bridge.roads,
+    position: (() => { const gs = bridge.toGameState(); return gs ? structuredClone({ buildings: gs.state.buildings, roads: gs.state.roads }) : undefined; })(),
     planningInputs: structuredClone(computePlanning()?.inputs.map(({ settlementRoutes, cityProduction, longestRoadPath, ...input }) => input)),
-    devCardIds: bridge.myDevCardIds(),
+    devCardIds: bridge.myDevCardIds(), bankDevCards: bridge.bankDevCards,
+    robberHex: bridge.robberHex,
   });
 }
 
@@ -590,7 +597,7 @@ function computePlanning(): PlanningContext | null {
     // — unplayed dev cards × the deck's VP share (5/25), capped at 5.
     const hiddenVp = isYou
       ? bridge.myDevCardIds().filter((id) => id === 12).length
-      : Math.min(5, Math.round(Math.max(0, p.devCards) * 0.25));
+      : Math.min(5, Math.max(0, p.devCards) * (5 / 25));
     inputs.push({
       name,
       playerId: pid,
@@ -734,7 +741,12 @@ function processRow(el: Element): void {
     if (paid.size === 2) { historyComplete = true; if (handLedger) handLedger.complete = true; }
   }
   handLedger?.record(idx, ev);
-  if (!previous || previous.type === "ignored") { applyEvent(tracker, ev); recordMove(ev); }
+  // Rebuild metadata as well as hands after late or corrected rows. Ordering
+  // matters for development-card counts, the dice shoe and turn ownership.
+  const rebuilt = createTracker(tracker.youName);
+  for (const [, event] of [...rawEvents].sort(([a], [b]) => a - b)) applyEvent(rebuilt, event);
+  tracker = rebuilt;
+  if (!previous || previous.type === "ignored") recordMove(ev);
   syncTrackerFromState();
   if (ev.type === "monopoly-steal" && ev.player === tracker.youName) {
     const action = [...decisionHistory].reverse().find((d) => d.decision.kind === "play-monopoly" && !d.outcome && d.eventIndex < idx);
@@ -887,8 +899,8 @@ function attach(scroller: HTMLElement): void {
   // this tracker did), and setup turns send no diffs while the game waits on
   // a placement — pull the roster/hands from the bridge now, not on the next
   // diff, or the autopilot sits on "nothing to do" with an empty roster.
+  lastProcessedIndex = Math.max(-1, ...rawEvents.keys());
   syncTrackerFromState();
-  lastProcessedIndex = -1;
   observedScroller = scroller;
   gameRecorded = false;
   prevTurnColor = null;
@@ -1053,7 +1065,6 @@ window.setInterval(() => {
     myDevCardIds: bridge.myDevCardIds(),
     tradeOffers: bridge.pendingTradeOffers(),
     winTarget: bridge.winTarget,
-    endgameStep: ourEndgameStep(),
     planning: planning ?? undefined,
     playerCount: bridge.colorToName.size,
   });
@@ -1061,15 +1072,5 @@ window.setInterval(() => {
   if (bridge.myOpenOffer()) autopilot.onConfirm("propose-trade");
   scheduleRender();
 }, 1500);
-
-/** Our cheapest next VP step per the path-to-victory model, as a build item. */
-function ourEndgameStep(): "city" | "settlement" | "dev" | "road" | undefined {
-  const mine = computeWinChances().find((p) => p.isYou);
-  const step = mine?.steps[0]?.kind;
-  if (!step) return undefined;
-  if (step === "city" || step === "settlement") return step;
-  if (step === "longest-road") return "road";
-  return "dev"; // largest-army / vp-dev both come from the dev deck
-}
 
 watchForGame();

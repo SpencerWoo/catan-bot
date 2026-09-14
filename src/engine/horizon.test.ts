@@ -49,4 +49,19 @@ describe("remaining game horizon", () => {
     expect(gameHorizon([Infinity, 2]).turns).toBe(2);
     expect(gameHorizon([10, 0]).turns).toBe(0);
   });
+  it("returns settlement pieces on city upgrades and can upgrade a newly built settlement", () => {
+    const p: PlayerVictoryInput = { name: "us", isYou: true, publicVp: 8, settlementsLeft: 0,
+      citiesLeft: 1, roadsLeft: 0, settlementsOnBoard: 1, settlementSpotOpen: true,
+      knightsPlayed: 0, longestRoadLen: 0, longestRoadPath: null, hand: { wood: 1, brick: 1, sheep: 1, wheat: 3, ore: 3 },
+      production: empty(), settlementRoutes: [{ vertexId: 12, edges: [], conflicts: [], production: empty() }] };
+    const plan = analyzeVictory([p], { target: 10, devDeckLeft: 0 })[0];
+    expect(plan.steps.map((s) => s.kind)).toEqual(["city", "settlement"]);
+    expect(plan.turnsToWin).toBe(0);
+    const future = analyzeVictory([{ ...p, settlementsLeft: 1, settlementsOnBoard: 0 }], { target: 10, devDeckLeft: 0 })[0];
+    expect(future.steps.map((s) => s.kind)).toEqual(["settlement", "city"]);
+    expect(future.turnsToWin).toBe(0);
+    const exhausted = analyzeVictory([{ ...p, settlementsLeft: 0, settlementsOnBoard: 0 }], { target: 10, devDeckLeft: 0 })[0];
+    expect(exhausted.turnsToWin).toBe(Infinity);
+  });
+
 });

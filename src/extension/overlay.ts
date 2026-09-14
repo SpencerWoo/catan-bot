@@ -20,12 +20,11 @@ import { TrackerState, handTotal, visibleVp } from "./tracker";
 import {
   PlacementAdvice,
   advisePlacement,
-  colonistIdForColor,
   placementFacts,
   renderMiniMap,
 } from "./placement";
 import { Board, GameState, PlayerId } from "../engine/types";
-import { AutopilotView, estimateWinProbability, opponentStarveResource, riskModeOf } from "./autopilot";
+import { AutopilotView, estimateWinProbability } from "./autopilot";
 import { RushView } from "./rush/rushPilot";
 import { VictoryPlan } from "../engine/winnability";
 import { RushPref } from "./rush/rushMode";
@@ -711,24 +710,8 @@ export class Overlay {
     const pct = Math.round(Math.min(0.95, Math.max(0.05, wp.probability)) * 100);
     const sign = wp.probability >= 0.5 ? "+" : "−";
     const ev = (Math.abs(wp.probability - 0.5) * 2).toFixed(1);
-    const mode = riskModeOf(wp.probability);
-    const verdict =
-      mode === "protect"
-        ? "You're ahead — protecting the lead"
-        : mode === "lotto"
-          ? "You're behind — playing for variance"
-          : "Even game";
+    const verdict = "Race estimate unavailable — showing observed position only";
     const drivers = [...wp.reasoning];
-    if (mode === "lotto") drivers.push("Behind: dev cards stay in the plan — each is a comeback ticket.");
-    if (mode === "protect") drivers.push("Ahead: hands dump 3 cards before the limit so a 7 can't bite.");
-    const starve = ((): string | null => {
-      if (!gs || gs.youPlayer === null || !opp) return null;
-      const oppId = opp.playerId ?? colonistIdForColor(opp.color);
-      if (oppId === null) return null;
-      const r = opponentStarveResource(gs.state, oppId as PlayerId);
-      return r ? `They're thinnest on ${r} — robber on ${r} tiles hurts them most.` : null;
-    })();
-    if (starve) drivers.push(starve);
     const driverHtml = drivers
       .slice(0, 4)
       .map((r) => `<li>${esc(r)}</li>`)
