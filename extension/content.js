@@ -3,6 +3,22 @@ var __defNormalProp = (obj, key, value) => key in obj ? __defProp(obj, key, { en
 var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "symbol" ? key + "" : key, value);
 (function() {
   "use strict";
+  const CONTINUATION_PREF = "catanCopilot:continueAutoplay";
+  function loadContinuationPref() {
+    try {
+      const saved = localStorage.getItem(CONTINUATION_PREF);
+      if (saved === null) localStorage.setItem(CONTINUATION_PREF, "0");
+      return saved === "1";
+    } catch {
+      return false;
+    }
+  }
+  function saveContinuationPref(on) {
+    try {
+      localStorage.setItem(CONTINUATION_PREF, on ? "1" : "0");
+    } catch {
+    }
+  }
   const RESOURCES = ["wood", "brick", "sheep", "wheat", "ore"];
   function pips(token) {
     if (token === null) return 0;
@@ -2118,10 +2134,60 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
     }
     return 1 - survival;
   }
-  function expectedDiscardLoss(tracker2, hand, limit, rolls = Math.max(2, tracker2.players.size)) {
+  function expectedDiscardLoss(tracker2, hand, limit, rolls = Math.max(2, tracker2.players.size), income = /* @__PURE__ */ new Map()) {
     const total2 = RESOURCES.reduce((n, r) => n + hand[r], 0);
-    if (total2 <= limit) return 0;
-    return sevenExposure(tracker2, rolls) * Math.floor(total2 / 2);
+    const deck = deckStatus(tracker2);
+    const groups = /* @__PURE__ */ new Map();
+    for (let n = 2; n <= 12; n++) {
+      const gain = n === 7 ? -1 : income.get(n) ?? 0;
+      const group = groups.get(gain) ?? { full: 0, left: 0 };
+      group.full += pips(n);
+      group.left += deck.remaining.get(n) ?? pips(n);
+      groups.set(gain, group);
+    }
+    const gains = [...groups.keys()];
+    const full = [...groups.values()].map((g) => g.full);
+    const memo = /* @__PURE__ */ new Map();
+    const visit = (cards, left, steps) => {
+      if (steps <= 0) return 0;
+      let count = left.reduce((a, b) => a + b, 0);
+      if (count <= 5) {
+        left = full;
+        count = 36;
+      }
+      const key = `${cards}/${steps}/${left.join(",")}`;
+      const cached = memo.get(key);
+      if (cached !== void 0) return cached;
+      let loss = 0;
+      for (let i = 0; i < gains.length; i++) {
+        if (!left[i]) continue;
+        const discarded = gains[i] === -1 && cards > limit ? Math.floor(cards / 2) : 0;
+        const next = [...left];
+        next[i]--;
+        loss += left[i] / count * (discarded + visit(cards - discarded + Math.max(0, gains[i]), next, steps - 1));
+      }
+      memo.set(key, loss);
+      return loss;
+    };
+    return visit(total2, [...groups.values()].map((g) => g.left), Math.ceil(rolls));
+  }
+  function discardIncome(tracker2, gs, robberHex) {
+    const income = /* @__PURE__ */ new Map();
+    if (gs && gs.youPlayer !== null) {
+      for (const b of gs.state.buildings.filter((b2) => b2.player === gs.youPlayer)) {
+        for (const id of gs.state.board.vertices[b.vertexId].hexIds) {
+          const h = gs.state.board.hexes[id];
+          if (h.kind === "desert" || h.token === null || h.q === (robberHex == null ? void 0 : robberHex.x) && h.r === robberHex.y) continue;
+          income.set(h.token, (income.get(h.token) ?? 0) + (b.kind === "city" ? 2 : 1));
+        }
+      }
+    } else {
+      const you = tracker2.youName ? tracker2.players.get(tracker2.youName) : void 0;
+      for (const [n, cards] of (you == null ? void 0 : you.incomeByNumber) ?? []) {
+        income.set(n, RESOURCES.reduce((sum2, r) => sum2 + (cards[r] ?? 0), 0));
+      }
+    }
+    return income;
   }
   function bonusTiming(players, plans, target, kind, playKnight = false) {
     var _a;
@@ -2352,14 +2418,14 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
       options.push({ kind: "dev", cost: BUILD.dev, vp: 5 / 25 + armyValue, production: unblocking });
     }
     const builds = evaluateBuilds(options, you.hand, production, you.bankRatio, remaining, gap, horizon);
-    for (const build of builds) if (build.wait > 0) {
-      build.score -= expectedDiscardLoss(
-        tracker2,
-        you.hand,
-        tracker2.discardLimit,
-        rolls * Math.max(1, Math.min(build.wait, horizon.turns))
-      ) / 4;
-    }
+    const discardLoss = expectedDiscardLoss(
+      tracker2,
+      you.hand,
+      tracker2.discardLimit,
+      rolls,
+      discardIncome(tracker2, gs, opts.robberHex)
+    );
+    for (const build of builds) if (build.wait > 0) build.score -= discardLoss / 4;
     builds.sort((a, b) => b.score - a.score || a.wait - b.wait);
     const reserve = ((_b = builds[0]) == null ? void 0 : _b.cost) ?? remaining;
     const weights = Object.fromEntries(RESOURCES.map((r) => [
@@ -3054,7 +3120,7 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
     return best;
   }
   function decideNext(opts) {
-    var _a, _b, _c, _d, _e, _f, _g, _h, _i;
+    var _a, _b, _c, _d, _e, _f, _g, _h, _i, _j, _k, _l;
     const { tracker: tracker2, youName, fit, gs, advice, rolledThisTurn, robberPending, robberHex, discardPending } = opts;
     const you = tracker2.players.get(youName);
     if (!you) return null;
@@ -3168,7 +3234,20 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
       gap: planning.gap,
       alternatives: choices.slice(0, 8).map((b) => ({ kind: b.kind, score: b.score, wait: b.wait, vertexId: b.vertexId }))
     };
-    const finish = (decision) => ({ ...decision, evaluation });
+    const finish = (decision) => {
+      var _a2, _b2;
+      if (((_a2 = evaluation.spending) == null ? void 0 : _a2.selected) === "save" && decision.kind !== "end-turn") {
+        evaluation.spending.selected = ((_b2 = decision.funding) == null ? void 0 : _b2.kind) ?? decision.kind;
+      }
+      if (evaluation.spending) {
+        const ranked = evaluation.spending.alternatives.sort((a, b) => b.score - a.score);
+        const dev = ranked.find((a) => a.kind === "dev");
+        const retained = ranked.slice(0, 8);
+        if (dev && !retained.includes(dev)) retained.push(dev);
+        evaluation.spending.alternatives = retained;
+      }
+      return { ...decision, evaluation };
+    };
     const build = (choice) => {
       var _a2;
       if (!affordableWithTrades(you.hand, you.bankRatio, choice.cost)) return null;
@@ -3267,7 +3346,10 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
         return finish({ kind: "play-road-building", describe: `free roads accelerate the planned ${free.kind}` });
       }
     }
-    if (top && handSize > limit && (!funded || ((_e = opts.funding) == null ? void 0 : _e.partial))) {
+    const income = discardIncome(tracker2, gs, opts.robberHex);
+    const savingRolls = Math.max(2, tracker2.players.size);
+    const loss = (hand) => expectedDiscardLoss(tracker2, hand, limit, savingRolls, income);
+    if (top && loss(you.hand) > 0 && (!funded || ((_e = opts.funding) == null ? void 0 : _e.partial))) {
       const raw = evaluateBuilds(
         ((_f = opts.funding) == null ? void 0 : _f.partial) && funded ? [funded] : choices,
         you.hand,
@@ -3278,9 +3360,9 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
         planning.horizon
       );
       const save = raw[0];
-      const loss = (hand) => expectedDiscardLoss(tracker2, hand, limit);
-      const savingRolls = Math.max(2, tracker2.players.size);
-      let bestValue = save.score - expectedDiscardLoss(tracker2, you.hand, limit, savingRolls) / 4;
+      const savedLoss = loss(you.hand);
+      let bestValue = save.score - savedLoss / 4;
+      evaluation.spending = { savedLoss, savingScore: bestValue, selected: "save", alternatives: [] };
       let bestAction = null;
       for (const choice of raw) {
         if (choice.wait >= planning.horizon.turns) continue;
@@ -3332,13 +3414,53 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
           };
         }
         if (!action) continue;
-        const competing = partial ? save : raw.find((b) => b !== choice);
-        const afterWait = competing ? turnsToAfford(competing.cost, hand, planning.production, you.bankRatio) : 0;
+        const stagedRoad = action.kind === "build-road" && !!((_i = choice.roadEdges) == null ? void 0 : _i.length);
+        const competing = partial || choice === save ? save : raw.find((b) => b !== choice);
+        const competingCost = { ...competing == null ? void 0 : competing.cost };
+        if (stagedRoad && ((_j = competing == null ? void 0 : competing.roadEdges) == null ? void 0 : _j.includes(choice.roadEdges[0]))) {
+          competingCost.wood = (competingCost.wood ?? 0) - 1;
+          competingCost.brick = (competingCost.brick ?? 0) - 1;
+        }
+        const afterWait = competing ? turnsToAfford(competingCost, hand, planning.production, you.bankRatio) : 0;
         const delay = !competing ? 0 : Number.isFinite(afterWait) && Number.isFinite(competing.wait) ? Math.max(0, afterWait - competing.wait) / (1 + planning.horizon.turns) : 1;
-        const value = (partial ? save.score : choice.score) - loss(hand) / 4 - conversion / 4 - delay;
+        let continuationValue = 0;
+        let constructionDelay = Number.isFinite(afterWait) && Number.isFinite((competing == null ? void 0 : competing.wait) ?? 0) ? Math.max(0, afterWait - ((competing == null ? void 0 : competing.wait) ?? 0)) : null;
+        const followsTarget = !partial && choice.kind === "dev" && save.kind !== "dev";
+        if (followsTarget) {
+          const after = evaluateBuilds(
+            [save],
+            hand,
+            planning.production,
+            you.bankRatio,
+            planning.remaining,
+            Math.max(0, planning.gap - choice.vp),
+            planning.horizon
+          )[0];
+          continuationValue = after.score;
+          constructionDelay = Number.isFinite(after.wait) ? Math.max(0, after.wait - save.wait) : null;
+        }
+        let nextIncome = income;
+        if (!partial && !((_k = choice.roadEdges) == null ? void 0 : _k.length) && gs && gs.youPlayer !== null && choice.vertexId !== void 0 && (choice.kind === "city" || choice.kind === "settlement")) {
+          const buildings = choice.kind === "city" ? gs.state.buildings.map((b) => b.vertexId === choice.vertexId ? { ...b, kind: "city" } : b) : [...gs.state.buildings, { vertexId: choice.vertexId, player: gs.youPlayer, kind: "settlement" }];
+          nextIncome = discardIncome(tracker2, { ...gs, state: { ...gs.state, buildings } }, opts.robberHex);
+        }
+        const expectedLoss = expectedDiscardLoss(tracker2, hand, limit, savingRolls, nextIncome);
+        const value = (partial ? save.score : choice.score) + continuationValue - expectedLoss / 4 - conversion / 4 - (followsTarget ? 0 : delay);
+        evaluation.spending.alternatives.push({
+          kind: choice.kind,
+          vertexId: choice.vertexId,
+          remainingCards: RESOURCES.reduce((n, r) => n + hand[r], 0),
+          expectedLoss,
+          purchaseValue: partial ? 0 : choice.score,
+          continuationValue,
+          constructionDelay,
+          conversionCost: conversion / 4,
+          score: value
+        });
         if (value > bestValue + 1e-9) {
           bestValue = value;
           bestAction = action;
+          evaluation.spending.selected = choice.kind;
         }
       }
       if (bestAction) return finish({
@@ -3353,7 +3475,7 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
     if (top && !deliberateHold) {
       const action = build(top);
       if (action) return finish(action);
-      if (((_i = top.roadEdges) == null ? void 0 : _i.length) && top.wait < planning.horizon.turns && afford("road") && allowed("build-road") && hasPiece("road") && gs && board) {
+      if (((_l = top.roadEdges) == null ? void 0 : _l.length) && top.wait < planning.horizon.turns && afford("road") && allowed("build-road") && hasPiece("road") && gs && board) {
         const edge = board.edges[top.roadEdges[0]];
         const coord = pixelsToColonistEdge(board.vertices[edge.a], board.vertices[edge.b]);
         if (coord) return finish({
@@ -3370,7 +3492,8 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
     return allowed("end-turn") ? finish({ kind: "end-turn", describe: top ? `save for ${top.kind} (~${top.wait.toFixed(1)} turns)${deliberateHold}` : "end turn — no verified build target" }) : null;
   }
   class Autopilot {
-    constructor(learner2, dispatch = () => false, domAct = (kind, exclude) => tryDomAction(kind, document, exclude), domDiscard = tryDomDiscard) {
+    constructor(learner2, dispatch = () => false, domAct = (kind, exclude) => tryDomAction(kind, document, exclude), domDiscard = tryDomDiscard, random = Math.random, scheduleTick = () => {
+    }) {
       __publicField(this, "enabled", false);
       __publicField(this, "wsTurnSeen", false);
       __publicField(this, "robberPending", false);
@@ -3397,10 +3520,13 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
       __publicField(this, "note", "off");
       /** Hold time for the game's first settlement placement (think it through). */
       __publicField(this, "firstSettHold", null);
+      __publicField(this, "actionHold", null);
       this.learner = learner2;
       this.dispatch = dispatch;
       this.domAct = domAct;
       this.domDiscard = domDiscard;
+      this.random = random;
+      this.scheduleTick = scheduleTick;
     }
     setEnabled(on) {
       this.enabled = on;
@@ -3408,6 +3534,7 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
       if (!on) {
         this.pending = null;
         this.firstSettHold = null;
+        this.actionHold = null;
       }
     }
     onTurnState(currentColor, myColor) {
@@ -3431,6 +3558,7 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
     recomputeTurn() {
       var _a;
       const mine = this.wsMine || this.domMine;
+      if (mine !== this.myTurn) this.actionHold = null;
       if (mine && !this.myTurn) {
         this.rolledThisTurn = false;
         this.devPlayedThisTurn = false;
@@ -3449,8 +3577,9 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
       if (((_a = this.pending) == null ? void 0 : _a.kind) === "roll") this.pending = null;
     }
     onConfirm(kind) {
-      var _a;
-      if (((_a = this.pending) == null ? void 0 : _a.kind) === kind) this.pending = null;
+      var _a, _b;
+      if (((_a = this.actionHold) == null ? void 0 : _a.kind) === kind) this.actionHold = null;
+      if (((_b = this.pending) == null ? void 0 : _b.kind) === kind) this.pending = null;
       if (kind === "move-robber") this.robberPending = false;
       if (kind === "discard") this.discardPending = false;
       if (kind === "play-knight" || kind === "play-monopoly" || kind === "play-road-building" || kind === "play-year-of-plenty") {
@@ -3468,17 +3597,19 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
     }
     /** A 7 was rolled or a knight played — the current player must move the robber. */
     setRobberPending(pending) {
+      if (this.robberPending !== pending) this.actionHold = null;
       this.robberPending = pending;
     }
     /** The game is asking for discards (a 7 while someone is over the limit). */
     setDiscardPending(pending) {
+      if (this.discardPending !== pending) this.actionHold = null;
       this.discardPending = pending;
     }
     view() {
       return { enabled: this.enabled, status: this.learner.status(), note: this.note };
     }
     tick(ctx) {
-      var _a, _b, _c, _d, _e, _f;
+      var _a, _b, _c, _d, _e, _f, _g;
       const vpCardsHeld = (ctx.myDevCardIds ?? []).filter((id) => id === 12).length;
       if (!this.enabled) return;
       const now = ctx.now ?? Date.now();
@@ -3524,6 +3655,7 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
       const mustDiscard = this.discardPending && !!you && handTotal(you) > (((_e = ctx.tracker) == null ? void 0 : _e.discardLimit) ?? 9);
       if (!robberMine && !mustDiscard && (!this.myTurn || !ctx.tracker || !ctx.tracker.youName)) {
         const sig = this.domMine ? "banner" : this.wsMine ? "ws" : "none";
+        this.actionHold = null;
         this.note = `on — waiting for your turn (signal: ${sig})`;
         return;
       }
@@ -3562,6 +3694,7 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
         this.lastAsked = Object.keys(decision.offer.wanted)[0] ?? null;
       }
       if (!decision) {
+        this.actionHold = null;
         this.note = robberMine ? "on — move the robber manually (board not captured or no good tile)" : "on — nothing to do";
         return;
       }
@@ -3581,7 +3714,27 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
         this.note = "holding Monopoly — resource holdings are not confirmed";
         return;
       }
+      if (decision.kind === "bank-trade" || decision.kind === "discard") {
+        const key = JSON.stringify([
+          decision.kind,
+          decision.trade,
+          decision.cards,
+          you == null ? void 0 : you.hand,
+          this.myTurn,
+          mustDiscard
+        ]);
+        if (((_g = this.actionHold) == null ? void 0 : _g.key) !== key) {
+          const delay = Math.floor(this.random() * 2001);
+          this.actionHold = { kind: decision.kind, key, until: now + delay };
+          if (delay > 0) this.scheduleTick(delay);
+        }
+        if (now < this.actionHold.until) {
+          this.note = `thinking: ${decision.describe}`;
+          return;
+        }
+      } else this.actionHold = null;
       if (this.dispatch(decision)) {
+        this.actionHold = null;
         if (decision.funding) this.funding = decision.funding;
         this.pending = { kind: decision.kind, t: now, via: "ws" };
         this.note = `acting: ${decision.describe}`;
@@ -3598,6 +3751,7 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
       if (decision.kind === "discard" && decision.cards) {
         const clicked = this.domDiscard(decision.cards);
         if (clicked) {
+          this.actionHold = null;
           this.pending = { kind: "discard", t: now, via: "dom" };
           this.note = `acting: ${decision.describe} (clicked the discard dialog)`;
           return;
@@ -3698,7 +3852,7 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
       byPlayers
     };
   }
-  const VERSION = "v1.25 nonblocking-autoplay";
+  const VERSION = "v1.26 discard-aware-spending";
   const CSS = `
 #catan-copilot {
   --surface: #fcfcfb; --ink: #0b0b0b; --ink-2: #52514e; --ink-3: #898781;
@@ -3999,7 +4153,7 @@ html.cc-docked-page {
       });
       this.setDocked(loadDockPref(), false);
       this.root.addEventListener("click", (e) => {
-        var _a, _b, _c, _d, _e, _f, _g, _h;
+        var _a, _b, _c, _d, _e, _f, _g, _h, _i, _j;
         const target = e.target;
         if (target.closest('[data-act="download-capture"]')) {
           (_b = (_a = this.hooks).onDownloadCapture) == null ? void 0 : _b.call(_a);
@@ -4010,9 +4164,11 @@ html.cc-docked-page {
         if (target.closest('[data-act="download-gamelogs"]')) {
           (_f = (_e = this.hooks).onDownloadGameLogs) == null ? void 0 : _f.call(_e);
         }
+        const continuation = target.closest('[data-act="toggle-continuation"]');
+        if (continuation) (_h = (_g = this.hooks).onToggleContinueAutoplay) == null ? void 0 : _h.call(_g, continuation.checked);
         const toggle = target.closest('[data-act="toggle-autopilot"]');
         if (toggle) {
-          (_h = (_g = this.hooks).onToggleAutopilot) == null ? void 0 : _h.call(_g, toggle.checked);
+          (_j = (_i = this.hooks).onToggleAutopilot) == null ? void 0 : _j.call(_i, toggle.checked);
         }
       });
       this.root.addEventListener("change", (e) => {
@@ -4175,7 +4331,7 @@ html.cc-docked-page {
       <div class="cc-hist">${rows}</div>`;
     }
     renderAutopilot() {
-      var _a, _b;
+      var _a, _b, _c, _d;
       const ap = (_b = (_a = this.hooks).getAutopilotView) == null ? void 0 : _b.call(_a);
       if (!ap) return "";
       return `
@@ -4184,6 +4340,11 @@ html.cc-docked-page {
         <label><input type="checkbox" data-act="toggle-autopilot" ${ap.enabled ? "checked" : ""}/>
         <strong>Play my turns</strong></label>
         <span class="cc-muted"> — ${esc(ap.note)}</span>
+      </p>
+      <p class="cc-note">
+        <label><input type="checkbox" data-act="toggle-continuation" ${((_d = (_c = this.hooks).getContinueAutoplay) == null ? void 0 : _d.call(_c)) ? "checked" : ""}/>
+        <strong>Continue autoplaying games</strong></label>
+        <span class="cc-muted"> — queue another game after this one</span>
       </p>`;
     }
     renderAfterGame() {
@@ -5434,7 +5595,14 @@ html.cc-docked-page {
   const bridge = new StateBridge();
   const learner = new ProtocolLearner();
   learner.load();
-  const autopilot = new Autopilot(learner, dispatchDecision);
+  const autopilot = new Autopilot(
+    learner,
+    dispatchDecision,
+    void 0,
+    void 0,
+    Math.random,
+    (delay) => window.setTimeout(tickAutopilot, delay)
+  );
   const rushPilot = new RushPilot((d) => {
     const mine = bridge.myColor === null ? 0 : bridge.buildings.filter((b) => b.colorId === bridge.myColor).length;
     return dispatchDecision(d, { setupPhase: mine < 2 });
@@ -5466,6 +5634,7 @@ html.cc-docked-page {
   let prevMyCities = 0;
   let prevMyRoads = 0;
   const gameContinuation = new GameContinuation();
+  let continueAutoplay = loadContinuationPref();
   const capture = [];
   const CAPTURE_LIMIT = 5e3;
   function downloadCapture() {
@@ -6101,6 +6270,12 @@ html.cc-docked-page {
           saveRushPref(pref);
           scheduleRender();
         },
+        getContinueAutoplay: () => continueAutoplay,
+        onToggleContinueAutoplay: (on) => {
+          continueAutoplay = on;
+          saveContinuationPref(on);
+          scheduleRender();
+        },
         onToggleAutopilot: (on) => {
           autopilot.setEnabled(on);
           rushPilot.setEnabled(on);
@@ -6178,12 +6353,12 @@ html.cc-docked-page {
     });
     scheduleRender();
   }
-  window.setInterval(() => {
+  function tickAutopilot() {
     if ((tracker == null ? void 0 : tracker.gameOver) && trackerGameId === location.href) {
       gameContinuation.finish(location.href, saveFullGameLog);
     }
     if (gameContinuation.isFinished(location.href)) {
-      gameContinuation.tick(autopilot.enabled, location.href);
+      gameContinuation.tick(continueAutoplay, location.href);
       return;
     }
     if (!tracker) return;
@@ -6231,6 +6406,7 @@ html.cc-docked-page {
     });
     if (bridge.myOpenOffer()) autopilot.onConfirm("propose-trade");
     scheduleRender();
-  }, 1500);
+  }
+  window.setInterval(tickAutopilot, 1500);
   watchForGame();
 })();

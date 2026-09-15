@@ -80,6 +80,10 @@ const checks = [
     before(heading("Plan to finish"), overlay.querySelector('[data-act="rush-pref"]')) &&
     before(overlay.querySelector('[data-act="rush-pref"]'), heading("Move history"))],
   ["overlay survives rejected bridge requests", bridgeAttempts > 0],
+  ["continuation defaults off independently of turn autoplay",
+    overlay.querySelector('[data-act="toggle-autopilot"]').checked &&
+    !overlay.querySelector('[data-act="toggle-continuation"]').checked &&
+    window.localStorage.getItem("catanCopilot:continueAutoplay") === "0"],
   ["board captured from real protocol", overlay.querySelectorAll("svg polygon").length === 19],
   ["players from roster", text.includes("LadyboyNick") && text.includes("Sera")],
   ["you-detection", text.includes("(you)")],

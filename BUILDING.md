@@ -22,6 +22,8 @@ with macOS; install your distribution's zip package on Linux). It builds,
 lints, and creates the unsigned add-on ZIP and this source ZIP in
 `dist/firefox/`. The manifest version determines artifact names; the npm
 package version and in-game strategy version are separate identifiers.
+The build also includes the strategy version in the extension's display name,
+using `src/extension/version.ts` so the browser title and in-game header agree.
 
 ## Reviewer notes and data disclosure
 

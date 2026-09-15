@@ -1,3 +1,4 @@
+import { loadContinuationPref, saveContinuationPref } from "./continuationPreference";
 import { HandLedger, HandSnapshot, confirmedMonopolyHaul } from "./handLedger";
 import { PlanningContext, planPosition, settlementRoutes, roadBonusPath, planningAdvice, vertexIncome } from "./planning";
 import { playerProduction } from "../engine/analysis";
@@ -147,7 +148,8 @@ const bridge = new StateBridge();
 
 const learner = new ProtocolLearner();
 learner.load();
-const autopilot = new Autopilot(learner, dispatchDecision);
+const autopilot = new Autopilot(learner, dispatchDecision, undefined, undefined, Math.random,
+  delay => window.setTimeout(tickAutopilot, delay));
 
 // Rush mode (no turns) runs its own pilot; the turn-based autopilot stays
 // untouched. Setup vs main game is decided by how many buildings we own.
@@ -186,6 +188,7 @@ let prevMyBuildings = 0;
 let prevMyCities = 0;
 let prevMyRoads = 0;
 const gameContinuation = new GameContinuation();
+let continueAutoplay = loadContinuationPref();
 
 /**
  * Protocol capture for autopilot: every decoded frame (both directions) from
@@ -936,6 +939,12 @@ function attach(scroller: HTMLElement): void {
         saveRushPref(pref);
         scheduleRender();
       },
+      getContinueAutoplay: () => continueAutoplay,
+      onToggleContinueAutoplay: (on) => {
+        continueAutoplay = on;
+        saveContinuationPref(on);
+        scheduleRender();
+      },
       onToggleAutopilot: (on) => {
         autopilot.setEnabled(on);
         rushPilot.setEnabled(on);
@@ -1027,14 +1036,14 @@ function rushTick(): void {
 
 // Autopilot loop: only does work while enabled; every action must be
 // confirmed by the game before the next one is attempted.
-window.setInterval(() => {
+function tickAutopilot(): void {
   // Results can outlive the log scroller. Game completion, not persistence,
   // controls continuation; never send turn actions for a finished game.
   if (tracker?.gameOver && trackerGameId === location.href) {
     gameContinuation.finish(location.href, saveFullGameLog);
   }
   if (gameContinuation.isFinished(location.href)) {
-    gameContinuation.tick(autopilot.enabled, location.href);
+    gameContinuation.tick(continueAutoplay, location.href);
     return;
   }
   if (!tracker) return;
@@ -1094,6 +1103,7 @@ window.setInterval(() => {
   // our own open offer appearing in the state confirms the proposal went out
   if (bridge.myOpenOffer()) autopilot.onConfirm("propose-trade");
   scheduleRender();
-}, 1500);
+}
+window.setInterval(tickAutopilot, 1500);
 
 watchForGame();

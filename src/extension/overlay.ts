@@ -257,6 +257,8 @@ export interface OverlayHooks {
   onDownloadCapture?: () => void;
   getAutopilotView?: () => AutopilotView;
   onToggleAutopilot?: (on: boolean) => void;
+  getContinueAutoplay?: () => boolean;
+  onToggleContinueAutoplay?: (on: boolean) => void;
   /** per-player win chance + path to victory */
   getWinChances?: () => VictoryPlan[];
   getPlanning?: () => PlanningContext | null;
@@ -423,6 +425,8 @@ export class Overlay {
       if (target.closest('[data-act="download-gamelogs"]')) {
         this.hooks.onDownloadGameLogs?.();
       }
+      const continuation = target.closest('[data-act="toggle-continuation"]');
+      if (continuation) this.hooks.onToggleContinueAutoplay?.((continuation as HTMLInputElement).checked);
       const toggle = target.closest('[data-act="toggle-autopilot"]');
       if (toggle) {
         this.hooks.onToggleAutopilot?.((toggle as HTMLInputElement).checked);
@@ -587,6 +591,11 @@ export class Overlay {
         <label><input type="checkbox" data-act="toggle-autopilot" ${ap.enabled ? "checked" : ""}/>
         <strong>Play my turns</strong></label>
         <span class="cc-muted"> — ${esc(ap.note)}</span>
+      </p>
+      <p class="cc-note">
+        <label><input type="checkbox" data-act="toggle-continuation" ${this.hooks.getContinueAutoplay?.() ? "checked" : ""}/>
+        <strong>Continue autoplaying games</strong></label>
+        <span class="cc-muted"> — queue another game after this one</span>
       </p>`;
   }
 
