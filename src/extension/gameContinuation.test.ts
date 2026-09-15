@@ -46,3 +46,44 @@ describe('game-end continuation', () => {
     expect(continuation.tick(true, true, 'game1')).toBe(true);
   });
 });
+
+it('advances through Continue, summary Play, and optional prompt Play exactly once', () => {
+  const continuation = new GameContinuation();
+  const tick = () => continuation.tick(true, true, 'game1');
+  expect(tick()).toBe(true);
+  document.body.innerHTML = '<button>Home</button><button id="summary">Play</button>';
+  const summary = vi.spyOn(document.querySelector<HTMLElement>('#summary')!, 'click');
+  expect(tick()).toBe(true);
+  expect(tick()).toBe(false);
+  expect(summary).toHaveBeenCalledOnce();
+  document.body.innerHTML += '<section><h2>Explore new worlds</h2><button id="prompt">Play</button><button>Subscribe</button></section>';
+  const prompt = vi.spyOn(document.querySelector<HTMLElement>('#prompt')!, 'click');
+  expect(continuation.tick(false, true, 'game1')).toBe(false);
+  expect(tick()).toBe(true);
+  expect(tick()).toBe(false);
+  expect(prompt).toHaveBeenCalledOnce();
+});
+
+it('does not click unrelated Play buttons or skip Continue', () => {
+  const continuation = new GameContinuation();
+  document.body.innerHTML = '<button>Play</button>';
+  expect(continuation.tick(true, true, 'game1')).toBe(false);
+  document.body.innerHTML = '<button>Continue</button>';
+  continuation.tick(true, true, 'game1');
+  document.body.innerHTML = '<button>Play</button>';
+  expect(continuation.tick(true, true, 'game1')).toBe(false);
+});
+
+it('waits for summary controls and does not repeat Play when no prompt appears', () => {
+  const continuation = new GameContinuation();
+  continuation.tick(true, true, 'game1');
+  document.body.innerHTML = '<button>Home</button><button disabled>Play</button>';
+  expect(continuation.tick(true, true, 'game1')).toBe(false);
+  document.querySelector('button[disabled]')!.removeAttribute('disabled');
+  expect(continuation.tick(false, true, 'game1')).toBe(false);
+  expect(continuation.tick(true, true, 'game1')).toBe(true);
+  document.body.innerHTML = '<button>Home</button><button>Play</button>';
+  expect(continuation.tick(true, true, 'game1')).toBe(false);
+  document.body.innerHTML = '<button>Continue</button>';
+  expect(continuation.tick(true, true, 'game2')).toBe(true);
+});

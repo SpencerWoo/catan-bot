@@ -1029,7 +1029,7 @@ function rushTick(): void {
 // confirmed by the game before the next one is attempted.
 window.setInterval(() => {
   // The results screen can outlive the log scroller and its tracker. Only
-  // continue after the game-over handler has persisted the result, and never
+  // advance Continue → Play → optional prompt Play after saving, and never
   // send turn actions while the finished game is still displayed.
   if (recordedGameId === location.href) {
     gameContinuation.tick(autopilot.enabled, true, recordedGameId);

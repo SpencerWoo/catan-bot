@@ -3698,7 +3698,7 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
       byPlayers
     };
   }
-  const VERSION = "v1.22 risk-aware-spending";
+  const VERSION = "v1.23 auto-next-game";
   const CSS = `
 #catan-copilot {
   --surface: #fcfcfb; --ink: #0b0b0b; --ink-2: #52514e; --ink-3: #898781;
@@ -5136,21 +5136,46 @@ html.cc-docked-page {
   }
   class GameContinuation {
     constructor() {
-      __publicField(this, "clickedGame", null);
+      __publicField(this, "game", null);
+      __publicField(this, "stage", "continue");
     }
     tick(enabled, resultSaved, gameId, doc = document) {
-      if (!enabled || !resultSaved || this.clickedGame === gameId) return false;
-      const button = [...doc.querySelectorAll('button, [role="button"]')].find((el) => {
-        var _a;
+      var _a;
+      if (!enabled || !resultSaved) return false;
+      if (this.game !== gameId) {
+        this.game = gameId;
+        this.stage = "continue";
+      }
+      if (this.stage === "done") return false;
+      const buttons = [...doc.querySelectorAll('button, [role="button"]')].filter((el) => {
+        var _a2;
         if (el.closest('[data-index], #catan-copilot, [hidden], [inert], [aria-hidden="true"], [aria-disabled="true"]')) return false;
         if (el.matches(":disabled")) return false;
-        if (!/^continue$/i.test((el.getAttribute("aria-label") || el.textContent || "").trim())) return false;
         const rect = el.getBoundingClientRect();
-        const style = (_a = doc.defaultView) == null ? void 0 : _a.getComputedStyle(el);
+        const style = (_a2 = doc.defaultView) == null ? void 0 : _a2.getComputedStyle(el);
         return rect.width > 0 && rect.height > 0 && (style == null ? void 0 : style.visibility) !== "hidden" && (style == null ? void 0 : style.display) !== "none";
       });
+      const named = (el, label) => (el.getAttribute("aria-label") || el.textContent || "").trim().toLowerCase() === label;
+      let button;
+      if (this.stage === "continue") {
+        button = buttons.find((el) => named(el, "continue"));
+      } else if (this.stage === "summary") {
+        if (buttons.some((el) => named(el, "home"))) {
+          button = buttons.find((el) => named(el, "play"));
+        }
+      } else {
+        const headings = doc.querySelectorAll('h1, h2, h3, [role="heading"]');
+        for (const heading of headings) {
+          if (!/^explore new worlds\b/i.test(((_a = heading.textContent) == null ? void 0 : _a.trim()) ?? "")) continue;
+          for (let parent = heading.parentElement; parent && parent !== doc.body; parent = parent.parentElement) {
+            button = buttons.find((el) => parent.contains(el) && named(el, "play"));
+            if (button) break;
+          }
+          if (button) break;
+        }
+      }
       if (!button) return false;
-      this.clickedGame = gameId;
+      this.stage = this.stage === "continue" ? "summary" : this.stage === "summary" ? "prompt" : "done";
       button.click();
       return true;
     }
