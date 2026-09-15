@@ -40,7 +40,7 @@ describe("game logs", () => {
     expect(loadGameLogs().length).toBeLessThanOrEqual(40);
   });
 
-  it("reports failed persistence so autoplay keeps the results screen open", () => {
+  it("reports failed persistence to the caller", () => {
     const write = vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
       throw new Error("storage unavailable");
     });

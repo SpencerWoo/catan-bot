@@ -1,14 +1,20 @@
-/** Advance a saved game through results and into matchmaking. */
+/** Advance a finished game through results and into matchmaking. */
 export class GameContinuation {
   private game: string | null = null;
   private stage: 'continue' | 'summary' | 'prompt' | 'done' = 'continue';
 
-  tick(enabled: boolean, resultSaved: boolean, gameId: string, doc: Document = document): boolean {
-    if (!enabled || !resultSaved) return false;
-    if (this.game !== gameId) {
-      this.game = gameId;
-      this.stage = 'continue';
-    }
+  /** Mark completion before best-effort persistence; saving never gates play. */
+  finish(gameId: string, saveResult: () => unknown): void {
+    if (this.game === gameId) return;
+    this.game = gameId;
+    this.stage = 'continue';
+    try { saveResult(); } catch { /* Saving is best-effort; keep autoplay running. */ }
+  }
+
+  isFinished(gameId: string): boolean { return this.game === gameId; }
+
+  tick(enabled: boolean, gameId: string, doc: Document = document): boolean {
+    if (!enabled || !this.isFinished(gameId)) return false;
     if (this.stage === 'done') return false;
     const buttons = [...doc.querySelectorAll<HTMLElement>('button, [role="button"]')].filter(el => {
       if (el.closest('[data-index], #catan-copilot, [hidden], [inert], [aria-hidden="true"], [aria-disabled="true"]')) return false;

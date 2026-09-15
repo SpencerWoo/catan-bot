@@ -3698,7 +3698,7 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
       byPlayers
     };
   }
-  const VERSION = "v1.24 result-save-recovery";
+  const VERSION = "v1.25 nonblocking-autoplay";
   const CSS = `
 #catan-copilot {
   --surface: #fcfcfb; --ink: #0b0b0b; --ink-2: #52514e; --ink-3: #898781;
@@ -5146,13 +5146,22 @@ html.cc-docked-page {
       __publicField(this, "game", null);
       __publicField(this, "stage", "continue");
     }
-    tick(enabled, resultSaved, gameId, doc = document) {
-      var _a;
-      if (!enabled || !resultSaved) return false;
-      if (this.game !== gameId) {
-        this.game = gameId;
-        this.stage = "continue";
+    /** Mark completion before best-effort persistence; saving never gates play. */
+    finish(gameId, saveResult) {
+      if (this.game === gameId) return;
+      this.game = gameId;
+      this.stage = "continue";
+      try {
+        saveResult();
+      } catch {
       }
+    }
+    isFinished(gameId) {
+      return this.game === gameId;
+    }
+    tick(enabled, gameId, doc = document) {
+      var _a;
+      if (!enabled || !this.isFinished(gameId)) return false;
       if (this.stage === "done") return false;
       const buttons = [...doc.querySelectorAll('button, [role="button"]')].filter((el) => {
         var _a2;
@@ -5420,6 +5429,7 @@ html.cc-docked-page {
     }
   }
   let tracker = null;
+  let trackerGameId = null;
   let overlay = null;
   const bridge = new StateBridge();
   const learner = new ProtocolLearner();
@@ -5455,10 +5465,7 @@ html.cc-docked-page {
   let prevMyBuildings = 0;
   let prevMyCities = 0;
   let prevMyRoads = 0;
-  let gameRecorded = false;
   const gameContinuation = new GameContinuation();
-  let recordedGameId = null;
-  let lastResultSaveAttempt = 0;
   const capture = [];
   const CAPTURE_LIMIT = 5e3;
   function downloadCapture() {
@@ -5970,10 +5977,11 @@ html.cc-docked-page {
         autopilot.markDevPlayed();
       }
     }
-    if (ev.type === "game-over" && !gameRecorded) {
-      gameRecorded = true;
-      if (historyComplete) recordGameEnd(tracker);
-      if (saveFullGameLog()) recordedGameId = location.href;
+    if (ev.type === "game-over") {
+      gameContinuation.finish(location.href, () => {
+        if (historyComplete) recordGameEnd(tracker);
+        saveFullGameLog();
+      });
     }
     scheduleRender();
   }
@@ -6051,6 +6059,7 @@ html.cc-docked-page {
   let observedScroller = null;
   function attach(scroller) {
     tracker = createTracker(getYouName());
+    trackerGameId = location.href;
     handLedger = null;
     restoredHandSnapshot = null;
     rawEvents.clear();
@@ -6073,7 +6082,6 @@ html.cc-docked-page {
     lastProcessedIndex = Math.max(-1, ...rawEvents.keys());
     syncTrackerFromState();
     observedScroller = scroller;
-    gameRecorded = false;
     prevTurnColor = null;
     prevMyBuildings = 0;
     prevMyCities = 0;
@@ -6171,18 +6179,14 @@ html.cc-docked-page {
     scheduleRender();
   }
   window.setInterval(() => {
-    if (recordedGameId === location.href) {
-      gameContinuation.tick(autopilot.enabled, true, recordedGameId);
+    if ((tracker == null ? void 0 : tracker.gameOver) && trackerGameId === location.href) {
+      gameContinuation.finish(location.href, saveFullGameLog);
+    }
+    if (gameContinuation.isFinished(location.href)) {
+      gameContinuation.tick(autopilot.enabled, location.href);
       return;
     }
     if (!tracker) return;
-    if (tracker.gameOver) {
-      if (Date.now() - lastResultSaveAttempt >= 5e3) {
-        lastResultSaveAttempt = Date.now();
-        if (saveFullGameLog()) recordedGameId = location.href;
-      }
-      return;
-    }
     if (!tracker.youName) tracker.youName = getYouName();
     syncTrackerFromState();
     if (!tracker.youName) return;
