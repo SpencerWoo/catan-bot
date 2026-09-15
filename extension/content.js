@@ -3698,7 +3698,7 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
       byPlayers
     };
   }
-  const VERSION = "v1.22 risk-aware-spending";
+  const VERSION = "v1.25 nonblocking-autoplay";
   const CSS = `
 #catan-copilot {
   --surface: #fcfcfb; --ink: #0b0b0b; --ink-2: #52514e; --ink-3: #898781;
@@ -5121,12 +5121,19 @@ html.cc-docked-page {
       const all = loadGameLogs();
       all.push(log);
       const retained = all.slice(-MAX_LOGS);
+      const obsoleteCheckpoints = Object.keys(localStorage).filter((key) => key.startsWith("catanCopilot:ledger:") && key !== `catanCopilot:ledger:${location.href}`);
       while (retained.length) {
         try {
           localStorage.setItem(KEY, JSON.stringify(retained));
           return true;
-        } catch {
-          if (retained.length === 1) throw new Error("Game log exceeds storage quota");
+        } catch (error) {
+          if (!(error instanceof DOMException) || error.name !== "QuotaExceededError") throw error;
+          const obsolete = obsoleteCheckpoints.shift();
+          if (obsolete) {
+            localStorage.removeItem(obsolete);
+            continue;
+          }
+          if (retained.length === 1) throw error;
           retained.shift();
         }
       }
@@ -5136,21 +5143,55 @@ html.cc-docked-page {
   }
   class GameContinuation {
     constructor() {
-      __publicField(this, "clickedGame", null);
+      __publicField(this, "game", null);
+      __publicField(this, "stage", "continue");
     }
-    tick(enabled, resultSaved, gameId, doc = document) {
-      if (!enabled || !resultSaved || this.clickedGame === gameId) return false;
-      const button = [...doc.querySelectorAll('button, [role="button"]')].find((el) => {
-        var _a;
+    /** Mark completion before best-effort persistence; saving never gates play. */
+    finish(gameId, saveResult) {
+      if (this.game === gameId) return;
+      this.game = gameId;
+      this.stage = "continue";
+      try {
+        saveResult();
+      } catch {
+      }
+    }
+    isFinished(gameId) {
+      return this.game === gameId;
+    }
+    tick(enabled, gameId, doc = document) {
+      var _a;
+      if (!enabled || !this.isFinished(gameId)) return false;
+      if (this.stage === "done") return false;
+      const buttons = [...doc.querySelectorAll('button, [role="button"]')].filter((el) => {
+        var _a2;
         if (el.closest('[data-index], #catan-copilot, [hidden], [inert], [aria-hidden="true"], [aria-disabled="true"]')) return false;
         if (el.matches(":disabled")) return false;
-        if (!/^continue$/i.test((el.getAttribute("aria-label") || el.textContent || "").trim())) return false;
         const rect = el.getBoundingClientRect();
-        const style = (_a = doc.defaultView) == null ? void 0 : _a.getComputedStyle(el);
+        const style = (_a2 = doc.defaultView) == null ? void 0 : _a2.getComputedStyle(el);
         return rect.width > 0 && rect.height > 0 && (style == null ? void 0 : style.visibility) !== "hidden" && (style == null ? void 0 : style.display) !== "none";
       });
+      const named = (el, label) => (el.getAttribute("aria-label") || el.textContent || "").trim().toLowerCase() === label;
+      let button;
+      if (this.stage === "continue") {
+        button = buttons.find((el) => named(el, "continue"));
+      } else if (this.stage === "summary") {
+        if (buttons.some((el) => named(el, "home"))) {
+          button = buttons.find((el) => named(el, "play"));
+        }
+      } else {
+        const headings = doc.querySelectorAll('h1, h2, h3, [role="heading"]');
+        for (const heading of headings) {
+          if (!/^explore new worlds\b/i.test(((_a = heading.textContent) == null ? void 0 : _a.trim()) ?? "")) continue;
+          for (let parent = heading.parentElement; parent && parent !== doc.body; parent = parent.parentElement) {
+            button = buttons.find((el) => parent.contains(el) && named(el, "play"));
+            if (button) break;
+          }
+          if (button) break;
+        }
+      }
       if (!button) return false;
-      this.clickedGame = gameId;
+      this.stage = this.stage === "continue" ? "summary" : this.stage === "summary" ? "prompt" : "done";
       button.click();
       return true;
     }
@@ -5388,6 +5429,7 @@ html.cc-docked-page {
     }
   }
   let tracker = null;
+  let trackerGameId = null;
   let overlay = null;
   const bridge = new StateBridge();
   const learner = new ProtocolLearner();
@@ -5423,9 +5465,7 @@ html.cc-docked-page {
   let prevMyBuildings = 0;
   let prevMyCities = 0;
   let prevMyRoads = 0;
-  let gameRecorded = false;
   const gameContinuation = new GameContinuation();
-  let recordedGameId = null;
   const capture = [];
   const CAPTURE_LIMIT = 5e3;
   function downloadCapture() {
@@ -5937,10 +5977,11 @@ html.cc-docked-page {
         autopilot.markDevPlayed();
       }
     }
-    if (ev.type === "game-over" && !gameRecorded) {
-      gameRecorded = true;
-      if (historyComplete) recordGameEnd(tracker);
-      if (saveFullGameLog()) recordedGameId = location.href;
+    if (ev.type === "game-over") {
+      gameContinuation.finish(location.href, () => {
+        if (historyComplete) recordGameEnd(tracker);
+        saveFullGameLog();
+      });
     }
     scheduleRender();
   }
@@ -6018,6 +6059,7 @@ html.cc-docked-page {
   let observedScroller = null;
   function attach(scroller) {
     tracker = createTracker(getYouName());
+    trackerGameId = location.href;
     handLedger = null;
     restoredHandSnapshot = null;
     rawEvents.clear();
@@ -6040,7 +6082,6 @@ html.cc-docked-page {
     lastProcessedIndex = Math.max(-1, ...rawEvents.keys());
     syncTrackerFromState();
     observedScroller = scroller;
-    gameRecorded = false;
     prevTurnColor = null;
     prevMyBuildings = 0;
     prevMyCities = 0;
@@ -6138,12 +6179,14 @@ html.cc-docked-page {
     scheduleRender();
   }
   window.setInterval(() => {
-    if (recordedGameId === location.href) {
-      gameContinuation.tick(autopilot.enabled, true, recordedGameId);
+    if ((tracker == null ? void 0 : tracker.gameOver) && trackerGameId === location.href) {
+      gameContinuation.finish(location.href, saveFullGameLog);
+    }
+    if (gameContinuation.isFinished(location.href)) {
+      gameContinuation.tick(autopilot.enabled, location.href);
       return;
     }
     if (!tracker) return;
-    if (tracker.gameOver) return;
     if (!tracker.youName) tracker.youName = getYouName();
     syncTrackerFromState();
     if (!tracker.youName) return;

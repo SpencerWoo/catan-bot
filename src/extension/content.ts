@@ -141,6 +141,7 @@ function dispatchDecision(d: AutopilotDecision, opts?: { setupPhase?: boolean })
  */
 
 let tracker: TrackerState | null = null;
+let trackerGameId: string | null = null;
 let overlay: Overlay | null = null;
 const bridge = new StateBridge();
 
@@ -184,9 +185,7 @@ let prevTurnColor: number | null = null;
 let prevMyBuildings = 0;
 let prevMyCities = 0;
 let prevMyRoads = 0;
-let gameRecorded = false;
 const gameContinuation = new GameContinuation();
-let recordedGameId: string | null = null;
 
 /**
  * Protocol capture for autopilot: every decoded frame (both directions) from
@@ -796,10 +795,11 @@ function processRow(el: Element): void {
       autopilot.markDevPlayed();
     }
   }
-  if (ev.type === "game-over" && !gameRecorded) {
-    gameRecorded = true;
-    if (historyComplete) recordGameEnd(tracker);
-    if (saveFullGameLog()) recordedGameId = location.href;
+  if (ev.type === "game-over") {
+    gameContinuation.finish(location.href, () => {
+      if (historyComplete) recordGameEnd(tracker!);
+      saveFullGameLog();
+    });
   }
   scheduleRender();
 }
@@ -892,6 +892,7 @@ let observedScroller: HTMLElement | null = null;
 
 function attach(scroller: HTMLElement): void {
   tracker = createTracker(getYouName());
+  trackerGameId = location.href;
   handLedger = null;
   restoredHandSnapshot = null;
   rawEvents.clear();
@@ -916,7 +917,6 @@ function attach(scroller: HTMLElement): void {
   lastProcessedIndex = Math.max(-1, ...rawEvents.keys());
   syncTrackerFromState();
   observedScroller = scroller;
-  gameRecorded = false;
   prevTurnColor = null;
   prevMyBuildings = 0;
   prevMyCities = 0;
@@ -1028,15 +1028,16 @@ function rushTick(): void {
 // Autopilot loop: only does work while enabled; every action must be
 // confirmed by the game before the next one is attempted.
 window.setInterval(() => {
-  // The results screen can outlive the log scroller and its tracker. Only
-  // continue after the game-over handler has persisted the result, and never
-  // send turn actions while the finished game is still displayed.
-  if (recordedGameId === location.href) {
-    gameContinuation.tick(autopilot.enabled, true, recordedGameId);
+  // Results can outlive the log scroller. Game completion, not persistence,
+  // controls continuation; never send turn actions for a finished game.
+  if (tracker?.gameOver && trackerGameId === location.href) {
+    gameContinuation.finish(location.href, saveFullGameLog);
+  }
+  if (gameContinuation.isFinished(location.href)) {
+    gameContinuation.tick(autopilot.enabled, location.href);
     return;
   }
   if (!tracker) return;
-  if (tracker.gameOver) return;
   if (!tracker.youName) tracker.youName = getYouName(); // header renders late on the game page
   syncTrackerFromState();
   if (!tracker.youName) return;

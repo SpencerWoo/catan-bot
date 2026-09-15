@@ -40,7 +40,7 @@ describe("game logs", () => {
     expect(loadGameLogs().length).toBeLessThanOrEqual(40);
   });
 
-  it("reports failed persistence so autoplay keeps the results screen open", () => {
+  it("reports failed persistence to the caller", () => {
     const write = vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
       throw new Error("storage unavailable");
     });
@@ -64,4 +64,27 @@ describe("game logs", () => {
     expect(gameLogsSummary(logs)).toBe("1 completed, 0W-1L, 2 incomplete");
   });
 
+});
+
+it('reclaims obsolete ledger caches before dropping game history under quota pressure', () => {
+  localStorage.clear();
+  const oldKey = 'catanCopilot:ledger:https://colonist.io/#old';
+  const currentKey = `catanCopilot:ledger:${location.href}`;
+  localStorage.setItem(oldKey, 'old checkpoint');
+  localStorage.setItem(currentKey, 'current checkpoint');
+  localStorage.setItem('unrelated', 'keep');
+  saveGameLog(makeLog({ winner: 'previous' }));
+  const realSet = Storage.prototype.setItem;
+  const write = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(function (this: Storage, key, value) {
+    if (key === 'catanCopilot:gamelogs' && localStorage.getItem(oldKey)) {
+      throw new DOMException('quota full', 'QuotaExceededError');
+    }
+    realSet.call(this, key, value);
+  });
+  try {
+    expect(saveGameLog(makeLog())).toBe(true);
+    expect(loadGameLogs()).toHaveLength(2);
+    expect(localStorage.getItem(currentKey)).toBe('current checkpoint');
+    expect(localStorage.getItem('unrelated')).toBe('keep');
+  } finally { write.mockRestore(); }
 });
