@@ -5124,13 +5124,35 @@ html.cc-docked-page {
       while (retained.length) {
         try {
           localStorage.setItem(KEY, JSON.stringify(retained));
-          break;
+          return true;
         } catch {
           if (retained.length === 1) throw new Error("Game log exceeds storage quota");
           retained.shift();
         }
       }
     } catch {
+    }
+    return false;
+  }
+  class GameContinuation {
+    constructor() {
+      __publicField(this, "clickedGame", null);
+    }
+    tick(enabled, resultSaved, gameId, doc = document) {
+      if (!enabled || !resultSaved || this.clickedGame === gameId) return false;
+      const button = [...doc.querySelectorAll('button, [role="button"]')].find((el) => {
+        var _a;
+        if (el.closest('[data-index], #catan-copilot, [hidden], [inert], [aria-hidden="true"], [aria-disabled="true"]')) return false;
+        if (el.matches(":disabled")) return false;
+        if (!/^continue$/i.test((el.getAttribute("aria-label") || el.textContent || "").trim())) return false;
+        const rect = el.getBoundingClientRect();
+        const style = (_a = doc.defaultView) == null ? void 0 : _a.getComputedStyle(el);
+        return rect.width > 0 && rect.height > 0 && (style == null ? void 0 : style.visibility) !== "hidden" && (style == null ? void 0 : style.display) !== "none";
+      });
+      if (!button) return false;
+      this.clickedGame = gameId;
+      button.click();
+      return true;
     }
   }
   const ACTION = {
@@ -5402,6 +5424,8 @@ html.cc-docked-page {
   let prevMyCities = 0;
   let prevMyRoads = 0;
   let gameRecorded = false;
+  const gameContinuation = new GameContinuation();
+  let recordedGameId = null;
   const capture = [];
   const CAPTURE_LIMIT = 5e3;
   function downloadCapture() {
@@ -5916,14 +5940,14 @@ html.cc-docked-page {
     if (ev.type === "game-over" && !gameRecorded) {
       gameRecorded = true;
       if (historyComplete) recordGameEnd(tracker);
-      saveFullGameLog();
+      if (saveFullGameLog()) recordedGameId = location.href;
     }
     scheduleRender();
   }
   let gameStartTime = 0;
   function saveFullGameLog() {
     var _a;
-    if (!tracker) return;
+    if (!tracker) return false;
     const you = tracker.youName;
     const winnerEntry = [...tracker.players.values()].find((p) => visibleVp(p) >= bridge.winTarget);
     const winner = typeof tracker.gameOver === "string" ? tracker.gameOver : (winnerEntry == null ? void 0 : winnerEntry.name) ?? null;
@@ -5973,7 +5997,7 @@ html.cc-docked-page {
       events: [...rawEvents].sort(([a], [b]) => a - b).map(([id, event]) => ({ id, event })),
       decisions: decisionHistory.slice()
     };
-    saveGameLog(log);
+    const saved = saveGameLog(log);
     try {
       fetch("http://127.0.0.1:8137/gamelog", {
         method: "POST",
@@ -5983,6 +6007,7 @@ html.cc-docked-page {
       }).catch(() => void 0);
     } catch {
     }
+    return saved;
   }
   function sweepExistingRows(scroller) {
     const rows = [...scroller.querySelectorAll("[data-index]")].sort(
@@ -6113,7 +6138,12 @@ html.cc-docked-page {
     scheduleRender();
   }
   window.setInterval(() => {
+    if (recordedGameId === location.href) {
+      gameContinuation.tick(autopilot.enabled, true, recordedGameId);
+      return;
+    }
     if (!tracker) return;
+    if (tracker.gameOver) return;
     if (!tracker.youName) tracker.youName = getYouName();
     syncTrackerFromState();
     if (!tracker.youName) return;

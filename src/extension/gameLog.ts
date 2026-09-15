@@ -91,18 +91,19 @@ export function loadGameLogs(): GameLog[] {
   }
 }
 
-export function saveGameLog(log: GameLog): void {
+export function saveGameLog(log: GameLog): boolean {
   try {
     const all = loadGameLogs();
     all.push(log);
     const retained = all.slice(-MAX_LOGS);
     while (retained.length) {
-      try { localStorage.setItem(KEY, JSON.stringify(retained)); break; }
+      try { localStorage.setItem(KEY, JSON.stringify(retained)); return true; }
       catch { if (retained.length === 1) throw new Error("Game log exceeds storage quota"); retained.shift(); }
     }
   } catch {
     // storage full/unavailable — the export button + bridge still capture it
   }
+  return false;
 }
 
 export function gameLogsSummary(logs: GameLog[]): string | null {
