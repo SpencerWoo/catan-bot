@@ -4,6 +4,7 @@
 //   GAME_START <mode/diff> <url>, GAME_OVER <winner> <elapsed>, STALL, DISCONNECT, ERROR
 //   node scripts/autoplay.mjs            (Ctrl-C / kill to stop)
 import fs from "node:fs";
+import { continuationAllowed } from "./autoplay-continuation.mjs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -106,6 +107,15 @@ async function setRushPref(on) {
 }
 
 async function newGame(plan) {
+  // Check immediately before every queue request, including retries. A missing
+  // legacy preference permits the explicitly launched runner's first game;
+  // the extension initializes new preferences to off.
+  const continueGames = await continuationAllowed(run);
+  if (!continueGames) {
+    await harvestGameLogs();
+    log("STOP continuation disabled — leaving the current results visible");
+    return false;
+  }
   const q = new URLSearchParams({ mode: plan.mode, diff: plan.diff, players: plan.players ?? "4" });
   const r = await fetch(`${DRIVER}/newgame?${q}`, { signal: AbortSignal.timeout(540000) });
   const j = await r.json();
@@ -167,8 +177,17 @@ for (;;) {
     let p = await run(PROBE).catch(() => null);
     // If a game is already running (e.g. started by hand), adopt it instead of abandoning it.
     const adopt = p && /#\w+/.test(p.url) && p.rows > 0 && !p.won && p.gameOver.length === 0;
+    if (!adopt && p) {
+      const continuing = await continuationAllowed(run);
+      if (!continuing) {
+        await harvestGameLogs();
+        log("STOP continuation disabled — leaving the current results visible");
+        break;
+      }
+    }
     if (!adopt) await restartDriverIfStale();
     const url = adopt ? p.url : await newGame(plan);
+    if (url === false) break;
     if (!url) { log("QUEUE still searching for a ranked opponent"); continue; }
     const start = Date.now();
     log(`GAME_START ${adopt ? "(adopted)" : `${plan.mode}/${plan.diff}`} ${url}`);

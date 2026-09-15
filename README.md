@@ -176,8 +176,16 @@ extension **learns them from watching you play**:
    style you actually played, and those records nudge future strategy scores
    (bounded ±15%).
 
-Trades stay manual by design (the overlay advises; you click). Autopilot is
-off by default every session.
+**Play my turns** remembers your preference and defaults on. The separate
+**Continue autoplaying games** checkbox defaults off: the bot finishes and saves
+the current game, then leaves the results visible. Enable it to advance through
+the results and queue another game. Both preferences persist independently; the
+standalone autoplay runner also honors continuation being switched off.
+
+Bank trades and forced discards each pause for a random 0–2 seconds before
+execution. Spending decisions compare holding cards with buying a development
+card and continuing toward the planned build, including incoming production and
+partial reductions in expected discards.
 
 **Fair-play caution:** automating moves violates colonist.io's terms on games
 with strangers and can get an account banned. Use it against colonist's AI

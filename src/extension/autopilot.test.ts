@@ -1797,7 +1797,7 @@ describe("forced discards", () => {
     const ap = new Autopilot(learner, (d) => {
       sent.push(d as { kind: string; cards?: Record<string, number> });
       return true;
-    });
+    }, undefined, undefined, () => 0);
     ap.setEnabled(true);
     ap.onTurnState(1, 3); // the OPPONENT's turn — their 7 still makes us discard
     ap.setDiscardPending(true);
@@ -1813,7 +1813,7 @@ describe("forced discards", () => {
     expect(ap.discardPending).toBe(false);
   });
 
-  it("does not trade solely to reduce an over-limit hand", () => {
+  it("buys a useful dev while retaining the later build instead of holding an exposed hand", () => {
     const t = trackerWith({ wood: 4, brick: 3, ore: 1, sheep: 1, wheat: 1 }); // 10 cards
     const fits = rankLiveStrategies(t, "Nick");
     const roadExpand = fits.find((f) => f.strategy.id === "road-expand")!;
@@ -1825,8 +1825,8 @@ describe("forced discards", () => {
       advice: null,
       rolledThisTurn: true,
     });
-    expect(d?.kind).toBe("end-turn");
-    expect(d?.describe).toContain("save for");
+    expect(d?.kind).toBe("buy-dev");
+    expect(d?.evaluation?.spending?.selected).toBe("dev");
   });
 
   it("bank-trades a lopsided over-limit hand toward the next build", () => {

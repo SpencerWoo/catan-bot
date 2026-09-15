@@ -5,7 +5,7 @@ import { BuildEvaluation, BuildOption, evaluateBuilds, gameHorizon, Horizon } fr
 import { roadPathTo, PlacementAdvice, describeVertex } from "./placement";
 import { expectedProduction } from "./copilot";
 import { TrackerState, visibleVp } from "./tracker";
-import { expectedDiscardLoss } from "./discardRisk";
+import { discardIncome, expectedDiscardLoss } from "./discardRisk";
 import { bonusTiming } from "../engine/bonusTiming";
 
 export interface PlanningContext {
@@ -210,10 +210,9 @@ export function planPosition(tracker: TrackerState, youName: string,
   // Charge the whole exposed hand, not only the delay to this build.
   // Immediate purchases are compared using their actual remaining hand by
   // the pilot, which also knows the allowed actions and trade sequence.
-  for (const build of builds) if (build.wait > 0) {
-    build.score -= expectedDiscardLoss(tracker, you.hand, tracker.discardLimit,
-      rolls * Math.max(1, Math.min(build.wait, horizon.turns))) / 4;
-  }
+  const discardLoss = expectedDiscardLoss(tracker, you.hand, tracker.discardLimit,
+    rolls, discardIncome(tracker, gs, opts.robberHex));
+  for (const build of builds) if (build.wait > 0) build.score -= discardLoss / 4;
   builds.sort((a, b) => b.score - a.score || a.wait - b.wait);
   const reserve = builds[0]?.cost ?? remaining;
   const weights = Object.fromEntries(RESOURCES.map((r) => [r,

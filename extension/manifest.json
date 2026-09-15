@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "Catan Copilot for colonist.io",
+  "name": "Catan Copilot v1.26 for colonist.io",
   "version": "0.3.1",
   "description": "Live card counting, dice tracking, placement advice, and optional experimental autopilot for colonist.io, with a local coaching bridge.",
   "browser_specific_settings": {
@@ -8,7 +8,11 @@
       "id": "catan-copilot@nbroa025.example",
       "strict_min_version": "140.0",
       "data_collection_permissions": {
-        "required": ["authenticationInfo", "websiteContent", "websiteActivity"]
+        "required": [
+          "authenticationInfo",
+          "websiteContent",
+          "websiteActivity"
+        ]
       }
     },
     "gecko_android": {
@@ -16,17 +20,28 @@
     }
   },
   "permissions": [],
-  "host_permissions": ["http://127.0.0.1:8137/*", "http://localhost:8137/*"],
+  "host_permissions": [
+    "http://127.0.0.1:8137/*",
+    "http://localhost:8137/*"
+  ],
   "content_scripts": [
     {
-      "matches": ["*://*.colonist.io/*"],
-      "js": ["inject.js"],
+      "matches": [
+        "*://*.colonist.io/*"
+      ],
+      "js": [
+        "inject.js"
+      ],
       "run_at": "document_start",
       "world": "MAIN"
     },
     {
-      "matches": ["*://*.colonist.io/*"],
-      "js": ["content.js"],
+      "matches": [
+        "*://*.colonist.io/*"
+      ],
+      "js": [
+        "content.js"
+      ],
       "run_at": "document_start"
     }
   ]

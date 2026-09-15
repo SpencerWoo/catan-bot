@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createTracker, applyEvent } from "./tracker";
-import { expectedDiscardLoss, sevenExposure } from "./discardRisk";
+import { discardIncome, expectedDiscardLoss, sevenExposure } from "./discardRisk";
 import { zeroHand, planPosition } from "./planning";
 import { decideNext } from "./autopilot";
 import { rankLiveStrategies } from "./copilot";
@@ -32,7 +32,7 @@ describe("seven exposure", () => {
     const t = riskTracker(true);
     expect(expectedDiscardLoss(t, { ...zeroHand(), wood: 7 }, 7)).toBe(0);
     expect(expectedDiscardLoss(t, { ...zeroHand(), wood: 8 }, 7)).toBe(4);
-    expect(expectedDiscardLoss(t, { ...zeroHand(), wood: 12 }, 7)).toBe(6);
+    expect(expectedDiscardLoss(t, { ...zeroHand(), wood: 12 }, 7)).toBeCloseTo(6);
     expect(expectedDiscardLoss(t, { ...zeroHand(), wood: 10 }, 7)).toBe(5);
   });
 });
@@ -101,7 +101,7 @@ it("keeps a partial trade's target after confirmation and never exchanges its re
   expect(us.hand.ore).toBe(1);
 });
 
-it("accepts high seven exposure when the productive investment beats spending now", () => {
+it("buys a dev without abandoning the valuable city when seven exposure is certain", () => {
   const t = riskTracker(true), us = t.players.get("Us")!;
   us.hand = { wood: 3, brick: 3, ore: 1, wheat: 1, sheep: 2 };
   const planning = planPosition(t, "Us", null);
@@ -114,7 +114,84 @@ it("accepts high seven exposure when the productive investment beats spending no
   planning.builds.sort((a, b) => Number(b.kind === "dev") - Number(a.kind === "dev"));
   const d = decideNext({ tracker: t, youName: "Us", fit: rankLiveStrategies(t, "Us")[0],
     gs: null, advice: null, rolledThisTurn: true, planning });
+  expect(d?.kind).toBe("buy-dev");
+  expect(d?.evaluation?.spending?.selected).toBe("dev");
+  expect(d?.evaluation?.spending?.alternatives.find(a => a.kind === "dev")?.continuationValue).toBeGreaterThan(0);
+});
+
+
+it("counts production before a seven even when the initial hand is at the limit", () => {
+  const t = createTracker("Us");
+  const hand = { ...zeroHand(), wood: 7 };
+  // Only a 6 followed by a 7 causes a discard within two rolls.
+  expect(expectedDiscardLoss(t, hand, 7, 2, new Map([[6, 1]]))).toBeCloseTo(5 / 36 * 6 / 35 * 4);
+  expect(expectedDiscardLoss(t, hand, 7, 1, new Map([[6, 1]]))).toBe(0);
+  expect(expectedDiscardLoss(t, hand, 9, 2, new Map([[6, 1]]))).toBe(0);
+});
+
+it("includes a second discard when the first still leaves too many cards", () => {
+  const t = createTracker("Us");
+  const hand = { ...zeroHand(), wood: 24 };
+  const firstLoss = sevenExposure(t, 2) * 12;
+  expect(expectedDiscardLoss(t, hand, 7, 2)).toBeCloseTo(firstLoss + 6 / 36 * 5 / 35 * 6);
+});
+
+it("uses current buildings for income and excludes the blocked hex", () => {
+  const t = createTracker("Us"), board = generateBoard(42);
+  const gs = { state: { board, buildings: [{ player: 0 as const, vertexId: 0, kind: "city" as const }], roads: [] }, youPlayer: 0 as const };
+  const hex = board.vertices[0].hexIds.map(id => board.hexes[id]).find(h => h.kind !== "desert")!;
+  const full = discardIncome(t, gs);
+  const blocked = discardIncome(t, gs, { x: hex.q, y: hex.r });
+  expect(full.get(hex.token!)! - (blocked.get(hex.token!) ?? 0)).toBe(2);
+});
+
+it("buys multiple development cards even when each purchase leaves residual risk", () => {
+  const t = riskTracker(true), us = t.players.get("Us")!;
+  us.hand = { wood: 8, brick: 0, ore: 3, wheat: 3, sheep: 3 };
+  const decide = (bankDevCards = 25) => {
+    const planning = planPosition(t, "Us", null);
+    planning.builds = planning.builds.filter(b => b.kind === "dev");
+    planning.horizon.turns = 12;
+    return decideNext({ tracker: t, youName: "Us", fit: rankLiveStrategies(t, "Us")[0],
+      gs: null, advice: null, rolledThisTurn: true, planning, bankDevCards });
+  };
+  for (let i = 0; i < 3; i++) {
+    const d = decide(3 - i);
+    expect(d?.kind).toBe("buy-dev");
+    const spending = d!.evaluation!.spending!;
+    expect(spending.alternatives.find(a => a.kind === "dev")!.expectedLoss).toBeLessThan(spending.savedLoss);
+    us.hand.ore--; us.hand.wheat--; us.hand.sheep--;
+    expect(Object.values(us.hand).reduce((a, b) => a + b)).toBeGreaterThan(7);
+  }
+  expect(decide(0)?.kind).toBe("end-turn");
+});
+
+it("still saves when spending delays a much more valuable productive build", () => {
+  const t = riskTracker(true), us = t.players.get("Us")!;
+  us.hand = { wood: 3, brick: 3, ore: 1, wheat: 1, sheep: 2 };
+  const planning = planPosition(t, "Us", null);
+  planning.production = { ...zeroHand(), ore: 1, wheat: 1 };
+  planning.horizon.turns = 12;
+  planning.builds.find(b => b.kind === "city")!.production = { ...zeroHand(), ore: 20, wheat: 20 };
+  const d = decideNext({ tracker: t, youName: "Us", fit: rankLiveStrategies(t, "Us")[0],
+    gs: null, advice: null, rolledThisTurn: true, planning });
   expect(d?.kind).toBe("end-turn");
-  expect(d?.describe).toContain("reward outweighs spending now");
-  expect(d?.describe).toContain("100% estimated seven risk");
+  expect(d?.evaluation?.spending?.selected).toBe("save");
+});
+
+it("credits a dev purchase that leaves ten cards while retaining a later city", () => {
+  const t = riskTracker(true), us = t.players.get("Us")!;
+  us.hand = { wood: 5, brick: 5, ore: 1, wheat: 1, sheep: 1 };
+  const planning = planPosition(t, "Us", null);
+  planning.production = { ...zeroHand(), ore: 1, wheat: 1 };
+  planning.horizon.turns = 12;
+  planning.builds.forEach(b => { b.production = zeroHand(); });
+  const d = decideNext({ tracker: t, youName: "Us", fit: rankLiveStrategies(t, "Us")[0],
+    gs: null, advice: null, rolledThisTurn: true, planning });
+  expect(d?.kind).toBe("buy-dev");
+  const dev = d!.evaluation!.spending!.alternatives.find(a => a.kind === "dev")!;
+  expect(dev.remainingCards).toBe(10);
+  expect(dev.expectedLoss).toBeGreaterThan(0);
+  expect(dev.expectedLoss).toBeLessThan(d!.evaluation!.spending!.savedLoss);
+  expect(dev.continuationValue).toBeGreaterThan(0);
 });

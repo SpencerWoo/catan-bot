@@ -3,7 +3,7 @@ import { vertexPips } from "../engine/board";
 import { evaluateBuilds, turnsToAfford, BuildEvaluation } from "../engine/horizon";
 import { PlanningContext, planPosition } from "./planning";
 import { bonusTiming } from "../engine/bonusTiming";
-import { expectedDiscardLoss, sevenExposure } from "./discardRisk";
+import { discardIncome, expectedDiscardLoss, sevenExposure } from "./discardRisk";
 import { confirmedMonopolyHaul } from "./handLedger";
 import { distanceFromPlayer, isVertexBuildable, playerProduction } from "../engine/analysis";
 import { pixelToColonistCorner, pixelsToColonistEdge } from "./coords";
@@ -48,7 +48,27 @@ export interface AutopilotDecision {
   /** for "propose-trade": what we give and what we ask */
   offer?: { offered: Partial<Record<Resource, number>>; wanted: Partial<Record<Resource, number>> };
   describe: string;
-  evaluation?: { horizon: number; gap: number; alternatives: Array<{ kind: string; score: number; wait: number; vertexId?: number }> };
+  evaluation?: {
+    horizon: number;
+    gap: number;
+    alternatives: Array<{ kind: string; score: number; wait: number; vertexId?: number }>;
+    spending?: {
+      savedLoss: number; // cards expected to be discarded before spending again
+      savingScore: number;
+      selected: string;
+      alternatives: Array<{
+        kind: string;
+        vertexId?: number;
+        remainingCards: number;
+        expectedLoss: number;
+        purchaseValue: number;
+        continuationValue: number;
+        constructionDelay: number | null; // own turns; null when unreachable
+        conversionCost: number; // score units, like purchaseValue/continuationValue
+        score: number;
+      }>;
+    };
+  };
 }
 
 /** The builds we're saving for, in order, as costs — the plan a trade must serve. */
@@ -750,9 +770,22 @@ export function decideNext(opts: {
     (opts.funding!.partial || affordableWithTrades(you.hand, you.bankRatio, b.cost))) : undefined;
   let top = funded ?? choices[0];
   let deliberateHold = "";
-  const evaluation = { horizon: planning.horizon.turns, gap: planning.gap,
+  const evaluation: NonNullable<AutopilotDecision["evaluation"]> = { horizon: planning.horizon.turns, gap: planning.gap,
     alternatives: choices.slice(0, 8).map((b) => ({ kind: b.kind, score: b.score, wait: b.wait, vertexId: b.vertexId })) };
-  const finish = (decision: AutopilotDecision): AutopilotDecision => ({ ...decision, evaluation });
+  const finish = (decision: AutopilotDecision): AutopilotDecision => {
+    if (evaluation.spending?.selected === "save" && decision.kind !== "end-turn") {
+      evaluation.spending.selected = decision.funding?.kind ?? decision.kind;
+    }
+    if (evaluation.spending) {
+      // Keep archived games compact while always retaining the dev comparison.
+      const ranked = evaluation.spending.alternatives.sort((a, b) => b.score - a.score);
+      const dev = ranked.find(a => a.kind === "dev");
+      const retained = ranked.slice(0, 8);
+      if (dev && !retained.includes(dev)) retained.push(dev);
+      evaluation.spending.alternatives = retained;
+    }
+    return { ...decision, evaluation };
+  };
   const build = (choice: BuildEvaluation): AutopilotDecision | null => {
     if (!affordableWithTrades(you.hand, you.bankRatio, choice.cost)) return null;
     const trade = tradeTowardCost(you.hand, you.bankRatio, choice.cost, planning.weights);
@@ -848,13 +881,16 @@ export function decideNext(opts: {
   }
   // Compare spending against saving in the same score/card units. Re-run
   // after every confirmed action; a purchase need not get below the limit.
-  if (top && handSize > limit && (!funded || opts.funding?.partial)) {
+  const income = discardIncome(tracker, gs, opts.robberHex);
+  const savingRolls = Math.max(2, tracker.players.size);
+  const loss = (hand: Record<Resource, number>) => expectedDiscardLoss(tracker, hand, limit, savingRolls, income);
+  if (top && loss(you.hand) > 0 && (!funded || opts.funding?.partial)) {
     const raw = evaluateBuilds(opts.funding?.partial && funded ? [funded] : choices, you.hand, planning.production, you.bankRatio,
       planning.remaining, planning.gap, planning.horizon);
     const save = raw[0];
-    const loss = (hand: Record<Resource, number>) => expectedDiscardLoss(tracker, hand, limit);
-    const savingRolls = Math.max(2, tracker.players.size);
-    let bestValue = save.score - expectedDiscardLoss(tracker, you.hand, limit, savingRolls) / 4;
+    const savedLoss = loss(you.hand);
+    let bestValue = save.score - savedLoss / 4;
+    evaluation.spending = { savedLoss, savingScore: bestValue, selected: "save", alternatives: [] };
     let bestAction: AutopilotDecision | null = null;
     for (const choice of raw) {
       if (choice.wait >= planning.horizon.turns) continue;
@@ -900,15 +936,51 @@ export function decideNext(opts: {
           describe: `bank-trade ${trade.giveCount} ${trade.give} for ${trade.get} toward ${choice.kind}` };
       }
       if (!action) continue;
-      const competing = partial ? save : raw.find(b => b !== choice);
-      const afterWait = competing ? turnsToAfford(competing.cost, hand, planning.production, you.bankRatio) : 0;
+      const stagedRoad = action.kind === "build-road" && !!choice.roadEdges?.length;
+      const competing = partial || choice === save ? save : raw.find(b => b !== choice);
+      const competingCost = { ...competing?.cost };
+      if (stagedRoad && competing?.roadEdges?.includes(choice.roadEdges![0])) {
+        competingCost.wood = (competingCost.wood ?? 0) - 1;
+        competingCost.brick = (competingCost.brick ?? 0) - 1;
+      }
+      const afterWait = competing ? turnsToAfford(competingCost, hand, planning.production, you.bankRatio) : 0;
       const delay = !competing ? 0 : Number.isFinite(afterWait) && Number.isFinite(competing.wait)
         ? Math.max(0, afterWait - competing.wait) / (1 + planning.horizon.turns) : 1;
       // An incomplete trade creates no points yet. It must pay for its certain
       // conversion loss through reduced risk; delay also protects better builds.
-      const value = (partial ? save.score : choice.score) - loss(hand) / 4
-        - conversion / 4 - delay;
-      if (value > bestValue + 1e-9) { bestValue = value; bestAction = action; }
+      // A dev purchase does not abandon the productive target. Credit its
+      // remaining value using the actual post-purchase budget, with the same
+      // horizon (so delayed construction loses production and is discounted).
+      // The purchase's resource cost is already removed from this budget;
+      // charging it again would penalize the same construction delay twice.
+      let continuationValue = 0;
+      let constructionDelay = Number.isFinite(afterWait) && Number.isFinite(competing?.wait ?? 0)
+        ? Math.max(0, afterWait - (competing?.wait ?? 0)) : null;
+      const followsTarget = !partial && choice.kind === "dev" && save.kind !== "dev";
+      if (followsTarget) {
+        const after = evaluateBuilds([save], hand, planning.production, you.bankRatio,
+          planning.remaining, Math.max(0, planning.gap - choice.vp), planning.horizon)[0];
+        continuationValue = after.score;
+        constructionDelay = Number.isFinite(after.wait) ? Math.max(0, after.wait - save.wait) : null;
+      }
+      let nextIncome = income;
+      if (!partial && !choice.roadEdges?.length && gs && gs.youPlayer !== null &&
+          choice.vertexId !== undefined && (choice.kind === "city" || choice.kind === "settlement")) {
+        const buildings = choice.kind === "city"
+          ? gs.state.buildings.map(b => b.vertexId === choice.vertexId ? { ...b, kind: "city" as const } : b)
+          : [...gs.state.buildings, { vertexId: choice.vertexId, player: gs.youPlayer, kind: "settlement" as const }];
+        nextIncome = discardIncome(tracker, { ...gs, state: { ...gs.state, buildings } }, opts.robberHex);
+      }
+      const expectedLoss = expectedDiscardLoss(tracker, hand, limit, savingRolls, nextIncome);
+      const value = (partial ? save.score : choice.score) + continuationValue - expectedLoss / 4
+        - conversion / 4 - (followsTarget ? 0 : delay);
+      evaluation.spending.alternatives.push({ kind: choice.kind, vertexId: choice.vertexId,
+        remainingCards: RESOURCES.reduce((n, r) => n + hand[r], 0), expectedLoss,
+        purchaseValue: partial ? 0 : choice.score, continuationValue, constructionDelay,
+        conversionCost: conversion / 4, score: value });
+      if (value > bestValue + 1e-9) {
+        bestValue = value; bestAction = action; evaluation.spending.selected = choice.kind;
+      }
     }
     if (bestAction) return finish({ ...bestAction,
       describe: `${bestAction.describe} — reduce discard exposure (${Math.round(sevenExposure(tracker, Math.max(2, tracker.players.size)) * 100)}% estimated seven risk before spending again)` });
@@ -986,6 +1058,7 @@ export class Autopilot {
   private note = "off";
   /** Hold time for the game's first settlement placement (think it through). */
   private firstSettHold: number | null = null;
+  private actionHold: { kind: "bank-trade" | "discard"; key: string; until: number } | null = null;
 
   constructor(
     private learner: ProtocolLearner,
@@ -1000,6 +1073,8 @@ export class Autopilot {
       exclude,
     ) => tryDomAction(kind, document, exclude),
     private domDiscard: (cards: Partial<Record<Resource, number>>) => string | null = tryDomDiscard,
+    private random: () => number = Math.random,
+    private scheduleTick: (delayMs: number) => void = () => {},
   ) {}
 
   setEnabled(on: boolean): void {
@@ -1008,6 +1083,7 @@ export class Autopilot {
     if (!on) {
       this.pending = null;
       this.firstSettHold = null;
+      this.actionHold = null;
     }
   }
 
@@ -1033,6 +1109,7 @@ export class Autopilot {
   /** Fold the WS and DOM turn signals; reset per-turn state on the rising edge. */
   private recomputeTurn(): void {
     const mine = this.wsMine || this.domMine;
+    if (mine !== this.myTurn) this.actionHold = null;
     if (mine && !this.myTurn) {
       // fresh turn: roll again, replay dev/knight limits, retry every control
       this.rolledThisTurn = false;
@@ -1053,6 +1130,7 @@ export class Autopilot {
   }
 
   onConfirm(kind: ActionKind): void {
+    if (this.actionHold?.kind === kind) this.actionHold = null;
     if (this.pending?.kind === kind) this.pending = null;
     if (kind === "move-robber") this.robberPending = false;
     if (kind === "discard") this.discardPending = false;
@@ -1078,11 +1156,13 @@ export class Autopilot {
 
   /** A 7 was rolled or a knight played — the current player must move the robber. */
   setRobberPending(pending: boolean): void {
+    if (this.robberPending !== pending) this.actionHold = null;
     this.robberPending = pending;
   }
 
   /** The game is asking for discards (a 7 while someone is over the limit). */
   setDiscardPending(pending: boolean): void {
+    if (this.discardPending !== pending) this.actionHold = null;
     this.discardPending = pending;
   }
 
@@ -1176,6 +1256,7 @@ export class Autopilot {
     if (!robberMine && !mustDiscard && (!this.myTurn || !ctx.tracker || !ctx.tracker.youName)) {
       // Surface which turn signals are firing so a detection gap is diagnosable.
       const sig = this.domMine ? "banner" : this.wsMine ? "ws" : "none";
+      this.actionHold = null;
       this.note = `on — waiting for your turn (signal: ${sig})`;
       return;
     }
@@ -1224,6 +1305,7 @@ export class Autopilot {
       this.lastAsked = (Object.keys(decision.offer.wanted) as Resource[])[0] ?? null;
     }
     if (!decision) {
+      this.actionHold = null;
       this.note = robberMine
         ? "on — move the robber manually (board not captured or no good tile)"
         : "on — nothing to do";
@@ -1251,10 +1333,30 @@ export class Autopilot {
       this.note = "holding Monopoly — resource holdings are not confirmed";
       return;
     }
+    // Re-evaluate on every tick; only the deadline is retained, never a stale
+    // decision. A changed action/hand gets its own pause. Both send paths below
+    // share this gate, and confirmation time starts only after actual dispatch.
+    if (decision.kind === "bank-trade" || decision.kind === "discard") {
+      const key = JSON.stringify([decision.kind, decision.trade, decision.cards,
+        you?.hand, this.myTurn, mustDiscard]);
+      if (this.actionHold?.key !== key) {
+        const delay = Math.floor(this.random() * 2001);
+        this.actionHold = { kind: decision.kind, key, until: now + delay };
+        // The regular poll is 1.5s: wake at the deadline rather than rounding
+        // every randomized pause up to 1.5 or 3 seconds.
+        if (delay > 0) this.scheduleTick(delay);
+      }
+      if (now < this.actionHold.until) {
+        this.note = `thinking: ${decision.describe}`;
+        return;
+      }
+    } else this.actionHold = null;
+
     // Preferred: dispatch real colonist WebSocket action frames (rolls, builds,
     // robber, end turn) — reverse-engineered from the protocol, works for
     // placements too.
     if (this.dispatch(decision)) {
+      this.actionHold = null;
       if (decision.funding) this.funding = decision.funding;
       this.pending = { kind: decision.kind, t: now, via: "ws" };
       this.note = `acting: ${decision.describe}`;
@@ -1273,6 +1375,7 @@ export class Autopilot {
     if (decision.kind === "discard" && decision.cards) {
       const clicked = this.domDiscard(decision.cards);
       if (clicked) {
+        this.actionHold = null;
         this.pending = { kind: "discard", t: now, via: "dom" };
         this.note = `acting: ${decision.describe} (clicked the discard dialog)`;
         return;
