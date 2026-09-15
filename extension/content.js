@@ -3698,7 +3698,7 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
       byPlayers
     };
   }
-  const VERSION = "v1.23 auto-next-game";
+  const VERSION = "v1.24 result-save-recovery";
   const CSS = `
 #catan-copilot {
   --surface: #fcfcfb; --ink: #0b0b0b; --ink-2: #52514e; --ink-3: #898781;
@@ -5121,12 +5121,19 @@ html.cc-docked-page {
       const all = loadGameLogs();
       all.push(log);
       const retained = all.slice(-MAX_LOGS);
+      const obsoleteCheckpoints = Object.keys(localStorage).filter((key) => key.startsWith("catanCopilot:ledger:") && key !== `catanCopilot:ledger:${location.href}`);
       while (retained.length) {
         try {
           localStorage.setItem(KEY, JSON.stringify(retained));
           return true;
-        } catch {
-          if (retained.length === 1) throw new Error("Game log exceeds storage quota");
+        } catch (error) {
+          if (!(error instanceof DOMException) || error.name !== "QuotaExceededError") throw error;
+          const obsolete = obsoleteCheckpoints.shift();
+          if (obsolete) {
+            localStorage.removeItem(obsolete);
+            continue;
+          }
+          if (retained.length === 1) throw error;
           retained.shift();
         }
       }
@@ -5451,6 +5458,7 @@ html.cc-docked-page {
   let gameRecorded = false;
   const gameContinuation = new GameContinuation();
   let recordedGameId = null;
+  let lastResultSaveAttempt = 0;
   const capture = [];
   const CAPTURE_LIMIT = 5e3;
   function downloadCapture() {
@@ -6168,7 +6176,13 @@ html.cc-docked-page {
       return;
     }
     if (!tracker) return;
-    if (tracker.gameOver) return;
+    if (tracker.gameOver) {
+      if (Date.now() - lastResultSaveAttempt >= 5e3) {
+        lastResultSaveAttempt = Date.now();
+        if (saveFullGameLog()) recordedGameId = location.href;
+      }
+      return;
+    }
     if (!tracker.youName) tracker.youName = getYouName();
     syncTrackerFromState();
     if (!tracker.youName) return;

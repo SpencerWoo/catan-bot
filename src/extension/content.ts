@@ -187,6 +187,7 @@ let prevMyRoads = 0;
 let gameRecorded = false;
 const gameContinuation = new GameContinuation();
 let recordedGameId: string | null = null;
+let lastResultSaveAttempt = 0;
 
 /**
  * Protocol capture for autopilot: every decoded frame (both directions) from
@@ -1036,7 +1037,15 @@ window.setInterval(() => {
     return;
   }
   if (!tracker) return;
-  if (tracker.gameOver) return;
+  if (tracker.gameOver) {
+    // A failed save must not permanently strand the results screen. This also
+    // recovers a finished game reconstructed after an extension/page reload.
+    if (Date.now() - lastResultSaveAttempt >= 5000) {
+      lastResultSaveAttempt = Date.now();
+      if (saveFullGameLog()) recordedGameId = location.href;
+    }
+    return;
+  }
   if (!tracker.youName) tracker.youName = getYouName(); // header renders late on the game page
   syncTrackerFromState();
   if (!tracker.youName) return;

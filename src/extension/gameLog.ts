@@ -96,9 +96,19 @@ export function saveGameLog(log: GameLog): boolean {
     const all = loadGameLogs();
     all.push(log);
     const retained = all.slice(-MAX_LOGS);
+    const obsoleteCheckpoints = Object.keys(localStorage).filter(key =>
+      key.startsWith("catanCopilot:ledger:") && key !== `catanCopilot:ledger:${location.href}`);
     while (retained.length) {
       try { localStorage.setItem(KEY, JSON.stringify(retained)); return true; }
-      catch { if (retained.length === 1) throw new Error("Game log exceeds storage quota"); retained.shift(); }
+      catch (error) {
+        if (!(error instanceof DOMException) || error.name !== "QuotaExceededError") throw error;
+        // Old per-game checkpoints are recovery caches, not the game archive.
+        // Reclaim them first; never remove the current game's checkpoint.
+        const obsolete = obsoleteCheckpoints.shift();
+        if (obsolete) { localStorage.removeItem(obsolete); continue; }
+        if (retained.length === 1) throw error;
+        retained.shift();
+      }
     }
   } catch {
     // storage full/unavailable — the export button + bridge still capture it

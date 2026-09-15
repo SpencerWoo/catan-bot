@@ -87,3 +87,16 @@ it('waits for summary controls and does not repeat Play when no prompt appears',
   document.body.innerHTML = '<button>Continue</button>';
   expect(continuation.tick(true, true, 'game2')).toBe(true);
 });
+
+it('continues without focus while the document is in a background tab', () => {
+  const focus = vi.spyOn(document, 'hasFocus').mockReturnValue(false);
+  const visibility = vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden');
+  try {
+    const continuation = new GameContinuation();
+    expect(continuation.tick(true, true, 'background-game')).toBe(true);
+    document.body.innerHTML = '<button>Home</button><button>Play</button>';
+    expect(continuation.tick(true, true, 'background-game')).toBe(true);
+    document.body.innerHTML = '<section><h2>Explore new worlds</h2><button>Play</button></section>';
+    expect(continuation.tick(true, true, 'background-game')).toBe(true);
+  } finally { focus.mockRestore(); visibility.mockRestore(); }
+});
