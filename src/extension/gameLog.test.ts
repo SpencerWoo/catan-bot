@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { describe, expect, it, beforeEach } from "vitest";
+import { describe, expect, it, beforeEach, vi } from "vitest";
 import { GameLog, gameLogsSummary, loadGameLogs, saveGameLog } from "./gameLog";
 
 function makeLog(over: Partial<GameLog> = {}): GameLog {
@@ -26,7 +26,7 @@ describe("game logs", () => {
   beforeEach(() => localStorage.clear());
 
   it("persists and reloads finished games", () => {
-    saveGameLog(makeLog({ won: true }));
+    expect(saveGameLog(makeLog({ won: true }))).toBe(true);
     saveGameLog(makeLog({ won: false, winner: "Ava" }));
     const logs = loadGameLogs();
     expect(logs).toHaveLength(2);
@@ -38,6 +38,17 @@ describe("game logs", () => {
   it("caps the archive so storage never overflows", () => {
     for (let i = 0; i < 60; i++) saveGameLog(makeLog());
     expect(loadGameLogs().length).toBeLessThanOrEqual(40);
+  });
+
+  it("reports failed persistence so autoplay keeps the results screen open", () => {
+    const write = vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+      throw new Error("storage unavailable");
+    });
+    try {
+      expect(saveGameLog(makeLog())).toBe(false);
+    } finally {
+      write.mockRestore();
+    }
   });
 
   it("summarizes the win/loss record", () => {

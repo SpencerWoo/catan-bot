@@ -17,6 +17,7 @@ import { deckStatus, expectedProduction, productionTotal, rankLiveStrategies } f
 import { handTotal, visibleVp } from "./tracker";
 import { loadRecords, recordGameEnd, strategyPriors } from "./learning";
 import { GameLog, loadGameLogs, saveGameLog } from "./gameLog";
+import { GameContinuation } from "./gameContinuation";
 import { VERSION } from "./version";
 import { RESOURCES, Resource, PlayerId } from "../engine/types";
 import { vertexPips } from "../engine/board";
@@ -184,6 +185,8 @@ let prevMyBuildings = 0;
 let prevMyCities = 0;
 let prevMyRoads = 0;
 let gameRecorded = false;
+const gameContinuation = new GameContinuation();
+let recordedGameId: string | null = null;
 
 /**
  * Protocol capture for autopilot: every decoded frame (both directions) from
@@ -796,7 +799,7 @@ function processRow(el: Element): void {
   if (ev.type === "game-over" && !gameRecorded) {
     gameRecorded = true;
     if (historyComplete) recordGameEnd(tracker);
-    saveFullGameLog();
+    if (saveFullGameLog()) recordedGameId = location.href;
   }
   scheduleRender();
 }
@@ -804,8 +807,8 @@ function processRow(el: Element): void {
 let gameStartTime = 0;
 
 /** Assemble and persist a full structured log of the finished game. */
-function saveFullGameLog(): void {
-  if (!tracker) return;
+function saveFullGameLog(): boolean {
+  if (!tracker) return false;
   const you = tracker.youName;
   const winnerEntry = [...tracker.players.values()].find((p) => visibleVp(p) >= bridge.winTarget);
   const winner =
@@ -861,7 +864,7 @@ function saveFullGameLog(): void {
     events: [...rawEvents].sort(([a], [b]) => a - b).map(([id, event]) => ({ id, event })),
     decisions: decisionHistory.slice(),
   };
-  saveGameLog(log);
+  const saved = saveGameLog(log);
   // Also append to the on-disk corpus if the local bridge is running.
   try {
     fetch("http://127.0.0.1:8137/gamelog", {
@@ -873,6 +876,7 @@ function saveFullGameLog(): void {
   } catch {
     /* no bridge — the localStorage archive + export still have it */
   }
+  return saved;
 }
 
 function sweepExistingRows(scroller: HTMLElement): void {
@@ -1024,7 +1028,15 @@ function rushTick(): void {
 // Autopilot loop: only does work while enabled; every action must be
 // confirmed by the game before the next one is attempted.
 window.setInterval(() => {
+  // The results screen can outlive the log scroller and its tracker. Only
+  // continue after the game-over handler has persisted the result, and never
+  // send turn actions while the finished game is still displayed.
+  if (recordedGameId === location.href) {
+    gameContinuation.tick(autopilot.enabled, true, recordedGameId);
+    return;
+  }
   if (!tracker) return;
+  if (tracker.gameOver) return;
   if (!tracker.youName) tracker.youName = getYouName(); // header renders late on the game page
   syncTrackerFromState();
   if (!tracker.youName) return;
