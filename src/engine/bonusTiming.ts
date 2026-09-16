@@ -11,7 +11,15 @@ export function bonusTiming(players: PlayerVictoryInput[], plans: VictoryPlan[],
   if (!me) return null;
   const army = kind === "largest-army";
   const held = army ? "holdsLargestArmy" : "holdsLongestRoad";
-  if (me[held]) return null;
+  if (me[held]) {
+    // Ties retain the holder. One knight now prevents a tied contender
+    // overtaking on their next play; do not wait for the award to be lost.
+    if (army && (me.playableKnights ?? 0) > 0 && players.some(p => !p.isYou &&
+      p.knightsPlayed >= me.knightsPlayed && p.publicVp + (p.hiddenVp ?? 0) + 2 >= target - 3 &&
+      (p.developmentCards === undefined || p.developmentCards > 0)))
+      return "defend Largest Army against a late-game contender";
+    return null;
+  }
   const plan = plans.find(p => p.isYou);
   const count = army ? Math.max(3, 1 + Math.max(0, ...players.map(p => p.knightsPlayed))) - me.knightsPlayed
     : me.longestRoadPath?.length ?? Infinity;

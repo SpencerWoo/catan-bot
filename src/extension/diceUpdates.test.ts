@@ -1,0 +1,41 @@
+import { afterEach, expect, it, vi } from 'vitest';
+import { observeGameLog } from './observeGameLog';
+import { parseLogRow } from './logParser';
+import { applyEvent, createTracker } from './tracker';
+import { Overlay } from './overlay';
+
+afterEach(() => { document.body.innerHTML = ''; vi.useRealTimers(); });
+it('observes late dice icon attributes and recycled row text/indices', async () => {
+  document.body.innerHTML = '<div id="log"><div data-index="1"><span style="font-weight:600">Us</span> rolled <img><img></div></div>';
+  const scroller = document.getElementById('log')!;
+  const events = new Map();
+  const observer = observeGameLog(scroller, row => events.set(row.getAttribute('data-index'), parseLogRow(row)));
+  const images = scroller.querySelectorAll('img');
+  images[0].setAttribute('alt','dice_3'); images[1].setAttribute('alt','dice_5');
+  await Promise.resolve();
+  expect(events.get('1')).toEqual({type:'roll',player:'Us',total:8});
+  scroller.firstElementChild!.setAttribute('data-index','2');
+  images[0].setAttribute('alt','dice_4');
+  scroller.querySelector('span')!.firstChild!.textContent = 'Them';
+  await Promise.resolve();
+  expect(events.get('2')).toEqual({type:'roll',player:'Them',total:9});
+  observer.disconnect();
+});
+it('updates dice and resource counts while a panel control retains focus', () => {
+  vi.useFakeTimers();
+  const state = createTracker('Us');
+  applyEvent(state,{type:'roll',player:'Us',total:8});
+  const overlay = new Overlay(document);
+  overlay.render(state);
+  const root = document.getElementById('catan-copilot')!;
+  const input = document.createElement('input'); root.appendChild(input); input.focus();
+  applyEvent(state,{type:'roll',player:'Us',total:9});
+  applyEvent(state,{type:'got',player:'Us',resources:{wood:2}});
+  overlay.render(state);
+  expect(document.activeElement).toBe(input);
+  expect(root.querySelector('[data-live-counts] [aria-label="wood 2"]')).not.toBeNull();
+  expect(root.querySelector('[data-live-counts]')!.textContent).toContain('2 observed rolls');
+  expect(root.querySelector('[data-live-counts]')!.textContent).toContain('last: 9');
+  expect(root.textContent).toContain('probabilities are estimates');
+  vi.clearAllTimers();
+});

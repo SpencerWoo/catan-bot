@@ -472,6 +472,8 @@ export class Overlay {
     // registers. Defer the repaint until they're done.
     const active = this.root.ownerDocument.activeElement;
     if (active && this.root.contains(active) && /^(SELECT|INPUT|TEXTAREA|OPTION)$/.test(active.tagName)) {
+      const liveCounts = this.root.querySelector('[data-live-counts]');
+      if (liveCounts) liveCounts.innerHTML = this.renderPlayers(state) + this.renderDeck(deckStatus(state), state);
       if (this.deferredRender === undefined) {
         this.deferredRender = this.root.ownerDocument.defaultView!.setTimeout(() => {
           this.deferredRender = undefined;
@@ -525,8 +527,7 @@ export class Overlay {
 
     parts.push(this.renderWhereToBuild(bridge ?? null, gs, advice));
     if (moveHtml) parts.push(moveHtml);
-    parts.push(this.renderPlayers(state));
-    parts.push(this.renderDeck(deckStatus(state), state));
+    parts.push(`<section data-live-counts>${this.renderPlayers(state)}${this.renderDeck(deckStatus(state), state)}</section>`);
     if (evalHtml) parts.push(evalHtml);
     parts.push(this.renderWinChances());
 
@@ -787,13 +788,14 @@ export class Overlay {
     let hitLine = "";
     if (yourNumbers.length > 0) {
       const pHit = yourNumbers.reduce((s, n) => s + (deck.prob.get(n) ?? 0), 0);
-      hitLine = `<p class="cc-note">Your numbers (${yourNumbers.join(", ")}) hit the next roll with <strong>${Math.round(pHit * 100)}%</strong>.</p>`;
+      hitLine = `<p class="cc-note">Your numbers (${yourNumbers.join(", ")}) have an estimated next-roll chance of <strong>${Math.round(pHit * 100)}%</strong>.</p>`;
     }
     const dueLine = deck.due.length
-      ? `<p class="cc-note">Over-due: <strong>${deck.due.join(", ")}</strong>. Exhausted: ${deck.cold.length ? deck.cold.join(", ") : "none"}.</p>`
+      ? `<p class="cc-note">Model favors: <strong>${deck.due.join(", ")}</strong>. Model depleted: ${deck.cold.length ? deck.cold.join(", ") : "none"}.</p>`
       : "";
     return `
-      <h4>Balanced-dice deck <span class="cc-muted">(${36 - deck.rollsIntoDeck} cards left, count above each bar)</span></h4>
+      <h4>Balanced-dice estimate <span class="cc-muted">(${deck.totalRemaining} modeled cards left)</span></h4>
+      <p class="cc-note">${state.rolls.length} observed rolls${state.rollHistoryComplete ? "" : " · partial history"}${state.lastRoll ? ` · last: ${state.lastRoll.total}` : ""}. Shuffle timing is unknown; bars and probabilities are estimates.</p>
       <div class="cc-deck">${cols.join("")}</div>
       ${hitLine}${dueLine}`;
   }

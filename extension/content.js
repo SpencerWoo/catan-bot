@@ -3,6 +3,112 @@ var __defNormalProp = (obj, key, value) => key in obj ? __defProp(obj, key, { en
 var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "symbol" ? key + "" : key, value);
 (function() {
   "use strict";
+  const resources = { 1: "wood", 2: "brick", 3: "sheep", 4: "wheat", 5: "ore" };
+  function cards(value) {
+    if (!Array.isArray(value) || value.some((id) => !resources[id])) return null;
+    const result = {};
+    for (const id of value) {
+      const r = resources[id];
+      result[r] = (result[r] ?? 0) + 1;
+    }
+    return result;
+  }
+  function parseStructuredLog(entry, names, you) {
+    const t = entry.text;
+    if (!t) return null;
+    const player = names.get(t.playerColor);
+    const ignored = () => ({ type: "ignored" });
+    if ([2, 22, 44, 60, 66, 74].includes(t.type)) return ignored();
+    if (t.type === 49) {
+      const tile = t.tileInfo;
+      return (tile == null ? void 0 : tile.diceNumber) && resources[tile.resourceType] ? { type: "blocked-roll", total: tile.diceNumber, resource: resources[tile.resourceType] } : null;
+    }
+    if (!player) return null;
+    switch (t.type) {
+      case 10: {
+        const a = t.firstDice, b = t.secondDice;
+        return [a, b].every((n) => Number.isInteger(n) && n >= 1 && n <= 6) ? { type: "roll", player, total: a + b } : null;
+      }
+      case 4:
+      case 5: {
+        const what = { 0: "road", 2: "settlement", 3: "city" }[t.pieceEnum];
+        return !what ? null : t.type === 4 ? { type: "place", player, color: String(t.playerColor), what } : { type: "build", player, what };
+      }
+      case 47: {
+        const delta = cards(t.cardsToBroadcast);
+        return delta && [0, 1].includes(t.distributionType) ? { type: t.distributionType === 0 ? "starting-resources" : "got", player, resources: delta } : null;
+      }
+      case 1:
+        return { type: "buy-dev", player };
+      case 11:
+        return { type: "move-robber", player };
+      case 14:
+      case 15: {
+        const delta = cards(t.cardEnums);
+        const resource = delta && Object.keys(delta)[0];
+        const thief = t.type === 14 ? names.get(entry.from) : player;
+        const victim = t.type === 14 ? player : you;
+        if (!thief || !victim || thief === victim) return null;
+        return resource ? { type: "steal-known", thief, victim, resource } : { type: "steal-unknown", thief, victim };
+      }
+      case 20: {
+        if (t.cardEnum === 11) return { type: "use-knight", player };
+        const card = { 13: "monopoly", 14: "road-building", 15: "year-of-plenty" }[t.cardEnum];
+        return card ? { type: "use-dev", player, card } : null;
+      }
+      case 21:
+      case 55: {
+        const delta = cards(t.cardEnums);
+        return delta ? { type: t.type === 21 ? "take-from-bank" : "discard", player, resources: delta } : null;
+      }
+      case 86: {
+        const resource = resources[t.cardEnum], count = t.amountStolen;
+        return resource && Number.isInteger(count) && count >= 0 ? { type: "monopoly-steal", player, resource, count } : null;
+      }
+      case 116: {
+        const before = cards(t.givenCardEnums), after = cards(t.receivedCardEnums);
+        if (!before || !after) return null;
+        const delta = { ...after };
+        for (const r of Object.keys(before)) delta[r] = (delta[r] ?? 0) - before[r];
+        return {
+          type: "bank-trade",
+          player,
+          delta,
+          gave: Object.values(before).reduce((a, b) => a + b, 0),
+          took: Object.values(after).reduce((a, b) => a + b, 0)
+        };
+      }
+      case 45:
+        return { type: "game-over", winner: player };
+      default:
+        return null;
+    }
+  }
+  function observeGameLog(scroller, process) {
+    const observer2 = new MutationObserver((mutations) => {
+      const rows = /* @__PURE__ */ new Set();
+      const collect = (node) => {
+        const element = node.nodeType === 1 ? node : node.parentElement;
+        if (!element || !scroller.contains(element)) return;
+        const row = element.closest("[data-index]");
+        if (row) rows.add(row);
+        element.querySelectorAll("[data-index]").forEach((row2) => rows.add(row2));
+      };
+      for (const m of mutations) {
+        collect(m.target);
+        m.addedNodes.forEach(collect);
+      }
+      for (const row of rows) process(row);
+    });
+    observer2.observe(scroller, {
+      childList: true,
+      subtree: true,
+      characterData: true,
+      attributes: true,
+      attributeFilter: ["data-index", "alt"]
+    });
+    return observer2;
+  }
   const CONTINUATION_PREF = "catanCopilot:continueAutoplay";
   function loadContinuationPref() {
     try {
@@ -70,7 +176,7 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
       const points = Math.min(Math.max(0, gap), option.vp);
       const wins = option.kind !== "dev" && points >= gap && gap > 0;
       const discount = Number.isFinite(wait) ? Math.exp(-wait / (1 + horizon.turns)) / (1 + wait) : 0;
-      const score = (points + productionValue / 4) * discount + (wins && wait === 0 ? 100 : 0);
+      const score = (points + (option.protectsBonus ? 2 : 0) + productionValue / 4) * discount + (wins && wait === 0 ? 100 : 0);
       return { ...option, wait, score, productionValue };
     }).sort((a, b) => b.score - a.score || a.wait - b.wait || a.kind.localeCompare(b.kind));
   }
@@ -586,7 +692,7 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
   function scoreVertex(board, vertexId, weights) {
     const v = board.vertices[vertexId];
     const notes = [];
-    const resources = [];
+    const resources2 = [];
     const pipsByKind = {};
     const pipsByToken = /* @__PURE__ */ new Map();
     let score = 0;
@@ -599,10 +705,10 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
       score += p * weights[h.kind];
       pipsByKind[h.kind] = (pipsByKind[h.kind] ?? 0) + p;
       pipsByToken.set(h.token, [...pipsByToken.get(h.token) ?? [], p]);
-      if (!resources.includes(h.kind)) resources.push(h.kind);
+      if (!resources2.includes(h.kind)) resources2.push(h.kind);
     }
-    score += (resources.length - 1) * 1.2;
-    if (resources.length >= 3) notes.push("3-resource diversity");
+    score += (resources2.length - 1) * 1.2;
+    if (resources2.length >= 3) notes.push("3-resource diversity");
     let dupPips = 0;
     for (const shares of pipsByToken.values()) {
       if (shares.length > 1) {
@@ -621,7 +727,7 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
       );
     }
     if (totalPips >= 10) notes.push(`strong production (${totalPips} pips)`);
-    return { vertexId, score, pips: totalPips, resources, notes };
+    return { vertexId, score, pips: totalPips, resources: resources2, notes };
   }
   function rankVertices(state, weights, limit = 5) {
     return state.board.vertices.filter((v) => isVertexBuildable(state, v.id)).map((v) => scoreVertex(state.board, v.id, weights)).sort((a, b) => b.score - a.score).slice(0, limit);
@@ -2148,23 +2254,23 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
     const gains = [...groups.keys()];
     const full = [...groups.values()].map((g) => g.full);
     const memo = /* @__PURE__ */ new Map();
-    const visit = (cards, left, steps) => {
+    const visit = (cards2, left, steps) => {
       if (steps <= 0) return 0;
       let count = left.reduce((a, b) => a + b, 0);
       if (count <= 5) {
         left = full;
         count = 36;
       }
-      const key = `${cards}/${steps}/${left.join(",")}`;
+      const key = `${cards2}/${steps}/${left.join(",")}`;
       const cached = memo.get(key);
       if (cached !== void 0) return cached;
       let loss = 0;
       for (let i = 0; i < gains.length; i++) {
         if (!left[i]) continue;
-        const discarded = gains[i] === -1 && cards > limit ? Math.floor(cards / 2) : 0;
+        const discarded = gains[i] === -1 && cards2 > limit ? Math.floor(cards2 / 2) : 0;
         const next = [...left];
         next[i]--;
-        loss += left[i] / count * (discarded + visit(cards - discarded + Math.max(0, gains[i]), next, steps - 1));
+        loss += left[i] / count * (discarded + visit(cards2 - discarded + Math.max(0, gains[i]), next, steps - 1));
       }
       memo.set(key, loss);
       return loss;
@@ -2183,8 +2289,8 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
       }
     } else {
       const you = tracker2.youName ? tracker2.players.get(tracker2.youName) : void 0;
-      for (const [n, cards] of (you == null ? void 0 : you.incomeByNumber) ?? []) {
-        income.set(n, RESOURCES.reduce((sum2, r) => sum2 + (cards[r] ?? 0), 0));
+      for (const [n, cards2] of (you == null ? void 0 : you.incomeByNumber) ?? []) {
+        income.set(n, RESOURCES.reduce((sum2, r) => sum2 + (cards2[r] ?? 0), 0));
       }
     }
     return income;
@@ -2195,7 +2301,11 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
     if (!me) return null;
     const army = kind === "largest-army";
     const held = army ? "holdsLargestArmy" : "holdsLongestRoad";
-    if (me[held]) return null;
+    if (me[held]) {
+      if (army && (me.playableKnights ?? 0) > 0 && players.some((p) => !p.isYou && p.knightsPlayed >= me.knightsPlayed && p.publicVp + (p.hiddenVp ?? 0) + 2 >= target - 3 && (p.developmentCards === void 0 || p.developmentCards > 0)))
+        return "defend Largest Army against a late-game contender";
+      return null;
+    }
     const plan = plans.find((p) => p.isYou);
     const count = army ? Math.max(3, 1 + Math.max(0, ...players.map((p) => p.knightsPlayed))) - me.knightsPlayed : ((_a = me.longestRoadPath) == null ? void 0 : _a.length) ?? Infinity;
     if (count <= 0 || !Number.isFinite(count) || !army && count > (me.roadsLeft ?? 0)) return null;
@@ -2302,6 +2412,32 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
     }
     return null;
   }
+  function roadDefensePath(state, players, target) {
+    const me = players.find((p) => p.isYou);
+    if (!(me == null ? void 0 : me.holdsLongestRoad) || me.playerId === void 0 || !me.roadsLeft) return null;
+    let threatenedLength = me.longestRoadLen;
+    for (const opponent of players) {
+      if (opponent.isYou || opponent.playerId === void 0 || opponent.publicVp + (opponent.hiddenVp ?? 0) + 2 < target - 3) continue;
+      const expected = Object.fromEntries(RESOURCES.map((r) => [
+        r,
+        opponent.hand[r] + opponent.production[r] * (opponent.rollsPerTurn ?? players.length)
+      ]));
+      const ceiling = state.roads.filter((r) => r.player === opponent.playerId).length + Math.min(3, opponent.roadsLeft ?? 0);
+      for (let length = ceiling; length > threatenedLength; length--) {
+        if (length <= threatenedLength) continue;
+        const path = roadBonusPath(state, opponent.playerId, length, opponent.roadsLeft ?? 0);
+        if (!(path == null ? void 0 : path.length)) continue;
+        const free = (opponent.developmentCards ?? 0) > 0 ? 2 : 0;
+        const paid = Math.max(0, path.length - free);
+        const possible = opponent.handKnown !== false ? turnsToAfford({ wood: paid, brick: paid }, expected, zeroHand(), opponent.bankRatios) === 0 : (opponent.resourceCardCount ?? 0) + RESOURCES.reduce((n, r) => n + opponent.production[r] * (opponent.rollsPerTurn ?? players.length), 0) >= paid * 2;
+        if (possible) {
+          threatenedLength = length;
+          break;
+        }
+      }
+    }
+    return threatenedLength > me.longestRoadLen ? roadBonusPath(state, me.playerId, threatenedLength, me.roadsLeft) : null;
+  }
   function planPosition(tracker2, youName, gs, opts = {}) {
     var _a, _b;
     const target = opts.target ?? 10;
@@ -2341,6 +2477,12 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
     for (const p of inputs) {
       p.holdsLargestArmy ?? (p.holdsLargestArmy = mostKnights >= 3 && p.knightsPlayed === mostKnights && inputs.filter((x) => x.knightsPlayed === mostKnights).length === 1);
       p.holdsLongestRoad ?? (p.holdsLongestRoad = mostRoads >= 5 && p.longestRoadLen === mostRoads && inputs.filter((x) => x.longestRoadLen === mostRoads).length === 1);
+    }
+    for (const p of inputs) {
+      const tracked = tracker2.players.get(p.name);
+      p.handKnown ?? (p.handKnown = (tracked == null ? void 0 : tracked.trackingHealth) === "exact");
+      p.resourceCardCount ?? (p.resourceCardCount = (tracked == null ? void 0 : tracked.serverCards) ?? RESOURCES.reduce((n, r) => n + p.hand[r], 0));
+      p.developmentCards ?? (p.developmentCards = (tracked == null ? void 0 : tracked.devCards) ?? 0);
     }
     const victories = analyzeVictory(inputs, { target, devDeckLeft: opts.devDeckLeft ?? null });
     const horizon = gameHorizon(victories.map((v) => v.turnsToWin));
@@ -2384,6 +2526,15 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
           ratios
         });
       }
+      const defense = roadDefensePath(gs.state, inputs, target);
+      if (defense == null ? void 0 : defense.length) options.push({
+        kind: "road",
+        vp: 0,
+        protectsBonus: true,
+        cost: { wood: defense.length, brick: defense.length },
+        production: zeroHand(),
+        roadEdges: defense
+      });
       const roadReason = bonusTiming(inputs, victories, target, "longest-road");
       if (((_a = me.longestRoadPath) == null ? void 0 : _a.length) && roadReason) options.push({
         kind: "road",
@@ -2626,8 +2777,8 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
       return { type: "move-robber", player };
     }
     if (text.includes("got") && player) {
-      const resources = countResources(el);
-      if (sum(resources) > 0) return { type: "got", player, resources };
+      const resources2 = countResources(el);
+      if (sum(resources2) > 0) return { type: "got", player, resources: resources2 };
     }
     return { type: "ignored" };
   }
@@ -2765,12 +2916,12 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
     }
     return best;
   }
-  function tryDomDiscard(cards, doc = document) {
+  function tryDomDiscard(cards2, doc = document) {
     const dialog = findDiscardDialog(doc);
     if (!dialog) return null;
     const used = /* @__PURE__ */ new Set();
     let clicked = 0;
-    for (const [res, n] of Object.entries(cards)) {
+    for (const [res, n] of Object.entries(cards2)) {
       const pattern = RESOURCE_LABELS[res];
       if (!pattern || !n) continue;
       const imgs = [...dialog.querySelectorAll("img")].filter(
@@ -2956,15 +3107,15 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
     }
     return best ? { give: best.give, get: need, giveCount: best.ratio } : null;
   }
-  function cardsToIds(cards) {
+  function cardsToIds(cards2) {
     const ids = [];
-    for (const [r, n] of Object.entries(cards)) {
+    for (const [r, n] of Object.entries(cards2)) {
       for (let i = 0; i < (n ?? 0); i++) ids.push(RESOURCE_TO_CARD_ID[r]);
     }
     return ids;
   }
-  function describeCards(cards) {
-    return Object.entries(cards).map(([r, n]) => `${n} ${r}`).join(" + ");
+  function describeCards(cards2) {
+    return Object.entries(cards2).map(([r, n]) => `${n} ${r}`).join(" + ");
   }
   function bestRobberHex(state, youPlayer, current, canRob = () => true, probOf, starve, planning) {
     var _a, _b, _c;
@@ -3120,7 +3271,7 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
     return best;
   }
   function decideNext(opts) {
-    var _a, _b, _c, _d, _e, _f, _g, _h, _i, _j, _k, _l;
+    var _a, _b, _c, _d, _e, _f, _g, _h, _i, _j, _k, _l, _m;
     const { tracker: tracker2, youName, fit, gs, advice, rolledThisTurn, robberPending, robberHex, discardPending } = opts;
     const you = tracker2.players.get(youName);
     if (!you) return null;
@@ -3140,11 +3291,11 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
     const deck = deckStatus(tracker2);
     const probOf = (n) => deck.prob.get(n) ?? pips(n) / 36;
     if (discardPending && handSize > limit) {
-      const cards = planDiscard(you.hand, Math.floor(handSize / 2), fit, (_a = planning.builds[0]) == null ? void 0 : _a.cost, planning.weights);
+      const cards2 = planDiscard(you.hand, Math.floor(handSize / 2), fit, (_a = planning.builds[0]) == null ? void 0 : _a.cost, planning.weights);
       return {
         kind: "discard",
-        cards,
-        describe: `discard ${describeCards(cards)} (keeping the next build)`
+        cards: cards2,
+        describe: `discard ${describeCards(cards2)} (keeping the next build)`
       };
     }
     if (robberPending && gs && gs.youPlayer !== null && board) {
@@ -3164,7 +3315,7 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
     }).map((b) => {
       const free = Math.min(count, b.roadEdges.length);
       return { ...b, cost: { ...b.cost, wood: (b.cost.wood ?? 0) - free, brick: (b.cost.brick ?? 0) - free } };
-    }), you.hand, planning.production, you.bankRatio, planning.remaining, planning.gap, planning.horizon);
+    }), you.hand, planning.production, you.bankRatio, planning.remaining, planning.gap, planning.horizon).sort((a, b) => Number(!!b.protectsBonus && b.wait === 0) - Number(!!a.protectsBonus && a.wait === 0) || b.score - a.score);
     if ((opts.freeRoadsPending ?? 0) > 0 && board && gs && gs.youPlayer !== null) {
       const advised = (((_b = freeRoadChoices(opts.freeRoadsPending)[0]) == null ? void 0 : _b.roadEdges) ?? (advice == null ? void 0 : advice.roadEdges) ?? []).find(
         (id) => !gs.state.roads.some((r) => r.edgeId === id)
@@ -3201,14 +3352,13 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
           (h) => board.hexes[h].q === robberHex.x && board.hexes[h].r === robberHex.y
         )
       );
-      if (blockedMine) return "the robber is on your tile";
       return bonusTiming(
         planning.inputs,
         planning.victories,
         ((_a2 = planning.victories.find((p) => p.isYou)) == null ? void 0 : _a2.target) ?? opts.winTarget ?? 10,
         "largest-army",
         true
-      );
+      ) ?? (blockedMine ? "the robber is on your tile" : null);
     })();
     const overLimit = handSize > limit;
     if (knightReason && !rolledThisTurn && !overLimit) {
@@ -3266,7 +3416,7 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
         if (!allowed("build-road") || !hasPiece("road")) return null;
         const edge = board.edges[roads[0]];
         const coord2 = pixelsToColonistEdge(board.vertices[edge.a], board.vertices[edge.b]);
-        return coord2 ? { kind: "build-road", coord: coord2, describe: `road for funded ${choice.kind === "road" ? "Longest Road" : "settlement claim"}` } : null;
+        return coord2 ? { kind: "build-road", coord: coord2, describe: choice.protectsBonus ? "defend Longest Road against a late-game contender" : `road for funded ${choice.kind === "road" ? "Longest Road" : "settlement claim"}` } : null;
       }
       if (choice.vertexId === void 0) return null;
       const v = board.vertices[choice.vertexId];
@@ -3279,11 +3429,10 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
       const action = build(choice);
       if (action) return finish(action);
     }
-    for (const choice of choices.filter((b) => b.deniesWin && b.wait === 0)) {
-      const action = build(choice);
-      if (action) return finish(action);
-    }
-    if (knightReason) return finish({ kind: "play-knight", describe: `play a knight — ${knightReason}` });
+    const army = planning.inputs.find((p) => p.isYou);
+    if (knightReason && army && !army.holdsLargestArmy && planning.gap <= 2 && army.knightsPlayed + 1 >= Math.max(3, 1 + Math.max(0, ...planning.inputs.filter((p) => !p.isYou).map((p) => p.knightsPlayed))))
+      return finish({ kind: "play-knight", describe: "play a knight — take Largest Army to win now" });
+    let monopolyAction = null;
     if (opts.hasMonopoly && allowed("play-monopoly")) {
       const opponents = [...tracker2.players.values()].filter((p) => p.name !== youName);
       const scoreHand = (hand, horizon = planning.horizon) => {
@@ -3300,6 +3449,7 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
         const haul = confirmedMonopolyHaul(tracker2.players.values(), youName, resource);
         const next = { ...you.hand, [resource]: you.hand[resource] + haul };
         let delay = 0;
+        let deniesImmediateFinish = false;
         let futureHaul = 0;
         for (const opponent of opponents) {
           const input = planning.inputs.find((p) => p.name === opponent.name);
@@ -3308,23 +3458,49 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
           const rate = Object.fromEntries(RESOURCES.map((r) => [r, input.production[r] * (input.rollsPerTurn ?? 2)]));
           const before = turnsToAfford(goal, opponent.hand, rate, opponent.bankRatio);
           const after = turnsToAfford(goal, { ...opponent.hand, [resource]: 0 }, rate, opponent.bankRatio);
+          if (haul > 0 && before === 0 && after > 0 && (((_e = planning.victories.find((p) => p.name === opponent.name)) == null ? void 0 : _e.turnsToWin) ?? Infinity) <= 1)
+            deniesImmediateFinish = true;
           delay += Number.isFinite(before) ? Math.min(planning.horizon.turns + 1, Math.max(0, after - before)) : 0;
           const expected = Object.fromEntries(RESOURCES.map((r) => [r, opponent.hand[r] + rate[r]]));
           const spends = affordableWithTrades(expected, opponent.bankRatio, goal);
           futureHaul += Math.max(0, expected[resource] - (spends ? goal[resource] ?? 0 : 0));
         }
+        const afterBuilds = evaluateBuilds(
+          choices,
+          next,
+          planning.production,
+          you.bankRatio,
+          planning.remaining,
+          planning.gap,
+          planning.horizon
+        );
+        const wins = haul > 0 && afterBuilds.some((b) => b.wait === 0 && b.kind !== "dev" && b.vp >= planning.gap);
+        const urgent = wins || deniesImmediateFinish || haul > 0 && afterBuilds.some((b) => b.wait === 0 && (b.deniesWin || b.protectsBonus));
         const value = scoreHand(next) - base + delay / (1 + planning.horizon.turns);
         const survival = planning.horizon.turns / (1 + planning.horizon.turns);
         const later = scoreHand({ ...futureHand, [resource]: futureHand[resource] + futureHaul }, laterHorizon) - futureBase;
         waitingValue = Math.max(waitingValue, survival * Math.max(0, later));
-        if (haul > 0 && (!best || value > best.value)) best = { resource, value, haul };
+        if (haul > 0 && (!best || Number(wins) > Number(best.wins) || wins === best.wins && (Number(urgent) > Number(best.urgent) || urgent === best.urgent && value > best.value)))
+          best = { resource, value, haul, urgent, wins };
       }
-      if (best && best.value > 0 && best.value + 1e-6 >= waitingValue) return finish({
-        kind: "play-monopoly",
-        resource: best.resource,
-        describe: `play monopoly on ${best.resource} — ${best.haul} confirmed cards, more useful now than waiting`
-      });
+      if (best && (best.urgent || best.value > 0 && best.value + 1e-6 >= waitingValue)) {
+        monopolyAction = {
+          kind: "play-monopoly",
+          resource: best.resource,
+          describe: `play monopoly on ${best.resource} — ${best.haul} confirmed cards, ${best.wins ? "funds victory now" : "more useful now than waiting"}`
+        };
+        if (best.wins) return finish(monopolyAction);
+      }
     }
+    for (const choice of choices.filter((b) => (b.deniesWin || b.protectsBonus) && b.wait === 0)) {
+      const action = build(choice);
+      if (action) return finish(action);
+    }
+    if (opts.hasRoadBuilding && allowed("play-road-building") && hasPiece("road") && freeRoadChoices(Math.min(2, (pieces == null ? void 0 : pieces.roads) ?? 2)).some((b) => b.protectsBonus && b.wait === 0))
+      return finish({ kind: "play-road-building", describe: "free roads defend Longest Road" });
+    if (knightReason == null ? void 0 : knightReason.startsWith("defend")) return finish({ kind: "play-knight", describe: `play a knight — ${knightReason}` });
+    if (monopolyAction) return finish(monopolyAction);
+    if (knightReason) return finish({ kind: "play-knight", describe: `play a knight — ${knightReason}` });
     if (top && opts.hasYearOfPlenty && allowed("play-year-of-plenty")) {
       let best = null;
       for (const a of RESOURCES) for (const b of RESOURCES) {
@@ -3349,9 +3525,9 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
     const income = discardIncome(tracker2, gs, opts.robberHex);
     const savingRolls = Math.max(2, tracker2.players.size);
     const loss = (hand) => expectedDiscardLoss(tracker2, hand, limit, savingRolls, income);
-    if (top && loss(you.hand) > 0 && (!funded || ((_e = opts.funding) == null ? void 0 : _e.partial))) {
+    if (top && loss(you.hand) > 0 && (!funded || ((_f = opts.funding) == null ? void 0 : _f.partial))) {
       const raw = evaluateBuilds(
-        ((_f = opts.funding) == null ? void 0 : _f.partial) && funded ? [funded] : choices,
+        ((_g = opts.funding) == null ? void 0 : _g.partial) && funded ? [funded] : choices,
         you.hand,
         planning.production,
         you.bankRatio,
@@ -3370,7 +3546,7 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
         const hand = { ...you.hand };
         let conversion = 0;
         let partial = false;
-        if (!action && ((_g = choice.roadEdges) == null ? void 0 : _g.length) && afford("road") && allowed("build-road") && hasPiece("road") && gs && board) {
+        if (!action && ((_h = choice.roadEdges) == null ? void 0 : _h.length) && afford("road") && allowed("build-road") && hasPiece("road") && gs && board) {
           const edge = board.edges[choice.roadEdges[0]];
           const coord = pixelsToColonistEdge(board.vertices[edge.a], board.vertices[edge.b]);
           if (coord) action = {
@@ -3380,7 +3556,7 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
           };
         }
         if (action) {
-          if ((_h = choice.roadEdges) == null ? void 0 : _h.length) {
+          if ((_i = choice.roadEdges) == null ? void 0 : _i.length) {
             if (action.trade) {
               hand[action.trade.give] -= action.trade.giveCount;
               hand[action.trade.get]++;
@@ -3414,10 +3590,10 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
           };
         }
         if (!action) continue;
-        const stagedRoad = action.kind === "build-road" && !!((_i = choice.roadEdges) == null ? void 0 : _i.length);
+        const stagedRoad = action.kind === "build-road" && !!((_j = choice.roadEdges) == null ? void 0 : _j.length);
         const competing = partial || choice === save ? save : raw.find((b) => b !== choice);
         const competingCost = { ...competing == null ? void 0 : competing.cost };
-        if (stagedRoad && ((_j = competing == null ? void 0 : competing.roadEdges) == null ? void 0 : _j.includes(choice.roadEdges[0]))) {
+        if (stagedRoad && ((_k = competing == null ? void 0 : competing.roadEdges) == null ? void 0 : _k.includes(choice.roadEdges[0]))) {
           competingCost.wood = (competingCost.wood ?? 0) - 1;
           competingCost.brick = (competingCost.brick ?? 0) - 1;
         }
@@ -3440,7 +3616,7 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
           constructionDelay = Number.isFinite(after.wait) ? Math.max(0, after.wait - save.wait) : null;
         }
         let nextIncome = income;
-        if (!partial && !((_k = choice.roadEdges) == null ? void 0 : _k.length) && gs && gs.youPlayer !== null && choice.vertexId !== void 0 && (choice.kind === "city" || choice.kind === "settlement")) {
+        if (!partial && !((_l = choice.roadEdges) == null ? void 0 : _l.length) && gs && gs.youPlayer !== null && choice.vertexId !== void 0 && (choice.kind === "city" || choice.kind === "settlement")) {
           const buildings = choice.kind === "city" ? gs.state.buildings.map((b) => b.vertexId === choice.vertexId ? { ...b, kind: "city" } : b) : [...gs.state.buildings, { vertexId: choice.vertexId, player: gs.youPlayer, kind: "settlement" }];
           nextIncome = discardIncome(tracker2, { ...gs, state: { ...gs.state, buildings } }, opts.robberHex);
         }
@@ -3475,7 +3651,7 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
     if (top && !deliberateHold) {
       const action = build(top);
       if (action) return finish(action);
-      if (((_l = top.roadEdges) == null ? void 0 : _l.length) && top.wait < planning.horizon.turns && afford("road") && allowed("build-road") && hasPiece("road") && gs && board) {
+      if (((_m = top.roadEdges) == null ? void 0 : _m.length) && top.wait < planning.horizon.turns && afford("road") && allowed("build-road") && hasPiece("road") && gs && board) {
         const edge = board.edges[top.roadEdges[0]];
         const coord = pixelsToColonistEdge(board.vertices[edge.a], board.vertices[edge.b]);
         if (coord) return finish({
@@ -3852,7 +4028,7 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
       byPlayers
     };
   }
-  const VERSION = "v1.26 discard-aware-spending";
+  const VERSION = "v1.27 endgame-defense";
   const CSS = `
 #catan-copilot {
   --surface: #fcfcfb; --ink: #0b0b0b; --ink-2: #52514e; --ink-3: #898781;
@@ -4234,6 +4410,8 @@ html.cc-docked-page {
       var _a, _b, _c, _d;
       const active = this.root.ownerDocument.activeElement;
       if (active && this.root.contains(active) && /^(SELECT|INPUT|TEXTAREA|OPTION)$/.test(active.tagName)) {
+        const liveCounts = this.root.querySelector("[data-live-counts]");
+        if (liveCounts) liveCounts.innerHTML = this.renderPlayers(state) + this.renderDeck(deckStatus(state), state);
         if (this.deferredRender === void 0) {
           this.deferredRender = this.root.ownerDocument.defaultView.setTimeout(() => {
             this.deferredRender = void 0;
@@ -4275,8 +4453,7 @@ html.cc-docked-page {
       }
       parts.push(this.renderWhereToBuild(bridge2 ?? null, gs, advice));
       if (moveHtml) parts.push(moveHtml);
-      parts.push(this.renderPlayers(state));
-      parts.push(this.renderDeck(deckStatus(state), state));
+      parts.push(`<section data-live-counts>${this.renderPlayers(state)}${this.renderDeck(deckStatus(state), state)}</section>`);
       if (evalHtml) parts.push(evalHtml);
       parts.push(this.renderWinChances());
       if (you && fits.length > 0) {
@@ -4506,11 +4683,12 @@ html.cc-docked-page {
       let hitLine = "";
       if (yourNumbers.length > 0) {
         const pHit = yourNumbers.reduce((s, n) => s + (deck.prob.get(n) ?? 0), 0);
-        hitLine = `<p class="cc-note">Your numbers (${yourNumbers.join(", ")}) hit the next roll with <strong>${Math.round(pHit * 100)}%</strong>.</p>`;
+        hitLine = `<p class="cc-note">Your numbers (${yourNumbers.join(", ")}) have an estimated next-roll chance of <strong>${Math.round(pHit * 100)}%</strong>.</p>`;
       }
-      const dueLine = deck.due.length ? `<p class="cc-note">Over-due: <strong>${deck.due.join(", ")}</strong>. Exhausted: ${deck.cold.length ? deck.cold.join(", ") : "none"}.</p>` : "";
+      const dueLine = deck.due.length ? `<p class="cc-note">Model favors: <strong>${deck.due.join(", ")}</strong>. Model depleted: ${deck.cold.length ? deck.cold.join(", ") : "none"}.</p>` : "";
       return `
-      <h4>Balanced-dice deck <span class="cc-muted">(${36 - deck.rollsIntoDeck} cards left, count above each bar)</span></h4>
+      <h4>Balanced-dice estimate <span class="cc-muted">(${deck.totalRemaining} modeled cards left)</span></h4>
+      <p class="cc-note">${state.rolls.length} observed rolls${state.rollHistoryComplete ? "" : " · partial history"}${state.lastRoll ? ` · last: ${state.lastRoll.total}` : ""}. Shuffle timing is unknown; bars and probabilities are estimates.</p>
       <div class="cc-deck">${cols.join("")}</div>
       ${hitLine}${dueLine}`;
     }
@@ -4545,7 +4723,7 @@ html.cc-docked-page {
       const rows = [...state.players.values()].sort((a, b) => visibleVp(b) - visibleVp(a)).map((p) => {
         const prodPips = Math.round(productionTotal(expectedProduction(p)) * 36);
         const total2 = p.serverCards ?? handTotal(p);
-        const cards = p.serverCards === null ? `${total2}${p.uncertainty ? `±${p.uncertainty}` : ""}` : `${total2}${p.uncertainty ? ` <span class="cc-muted">(${p.uncertainty}?)</span>` : ""}`;
+        const cards2 = p.serverCards === null ? `${total2}${p.uncertainty ? `±${p.uncertainty}` : ""}` : `${total2}${p.uncertainty ? ` <span class="cc-muted">(${p.uncertainty}?)</span>` : ""}`;
         const hand = HAND_ORDER.map(
           (r) => `<span class="cc-slot${p.hand[r] === 0 ? " zero" : ""}" title="${r}: ${p.hand[r]}" aria-label="${r} ${p.hand[r]}">${RESOURCE_ICON[r]}<span>${p.hand[r]}</span></span>`
         ).join("");
@@ -4553,7 +4731,7 @@ html.cc-docked-page {
           <tr>
             <td><span class="dot" style="background:${esc(p.color)}"></span>${esc(p.name)}${state.youName === p.name ? " <span class='cc-muted'>(you)</span>" : ""}</td>
             <td>${visibleVp(p)}</td>
-            <td title="${esc(p.trackingReason ?? p.trackingHealth ?? "unverified hand")}">${cards}${p.name !== state.youName ? ` <small>${esc(p.trackingHealth ?? "unverified")}</small>` : ""}</td>
+            <td title="${esc(p.trackingReason ?? p.trackingHealth ?? "unverified hand")}">${cards2}${p.name !== state.youName ? ` <small>${esc(p.trackingHealth ?? "unverified")}</small>` : ""}</td>
             <td>${prodPips}</td>
             <td>${p.devCards}/${p.knightsPlayed}</td>
           </tr>
@@ -4570,7 +4748,7 @@ html.cc-docked-page {
     }
     renderStrategies(fits) {
       if (fits.length === 0) return "";
-      const cards = fits.slice(0, 3).map((f, i) => {
+      const cards2 = fits.slice(0, 3).map((f, i) => {
         const rec = i === 0;
         return `
         <div class="cc-card${rec ? " rec" : ""}">
@@ -4580,7 +4758,7 @@ html.cc-docked-page {
           ${f.rationale.length ? `<ul>${f.rationale.map((r) => `<li>${esc(r)}</li>`).join("")}</ul>` : ""}
         </div>`;
       });
-      return `<h4>Your strategy</h4>${cards.join("")}`;
+      return `<h4>Your strategy</h4>${cards2.join("")}`;
     }
     renderTrades(tips, oneVsOne) {
       const heading = oneVsOne ? "Bank & ports (no player trades in 1v1)" : "Trading";
@@ -4711,8 +4889,8 @@ html.cc-docked-page {
     /** dev cards left in the bank, or null if the state hasn't shown them yet */
     get bankDevCards() {
       var _a, _b;
-      const cards = (_b = (_a = this.state.mechanicDevelopmentCardsState) == null ? void 0 : _a.bankDevelopmentCards) == null ? void 0 : _b.cards;
-      return Array.isArray(cards) ? cards.length : null;
+      const cards2 = (_b = (_a = this.state.mechanicDevelopmentCardsState) == null ? void 0 : _a.bankDevelopmentCards) == null ? void 0 : _b.cards;
+      return Array.isArray(cards2) ? cards2.length : null;
     }
     /** Wire sources verified against the September 14 protocol capture:
      * 0 settlements, 1 cities, 2 private VP cards, 3 army, 4 longest road.
@@ -4738,8 +4916,8 @@ html.cc-docked-page {
     myDevCardIds() {
       var _a, _b, _c, _d;
       if (this.myColor === null) return [];
-      const cards = (_d = (_c = (_b = (_a = this.state.mechanicDevelopmentCardsState) == null ? void 0 : _a.players) == null ? void 0 : _b[String(this.myColor)]) == null ? void 0 : _c.developmentCards) == null ? void 0 : _d.cards;
-      return Array.isArray(cards) ? cards.slice() : [];
+      const cards2 = (_d = (_c = (_b = (_a = this.state.mechanicDevelopmentCardsState) == null ? void 0 : _a.players) == null ? void 0 : _b[String(this.myColor)]) == null ? void 0 : _c.developmentCards) == null ? void 0 : _d.cards;
+      return Array.isArray(cards2) ? cards2.slice() : [];
     }
     /** Building pieces still in a player's supply (null = state not seen yet). */
     piecesLeft(color) {
@@ -4884,13 +5062,13 @@ html.cc-docked-page {
     /** Exact resource counts for a color; opponents' cards are masked (id 0). */
     handOf(color) {
       var _a, _b, _c;
-      const cards = ((_c = (_b = (_a = this.state.playerStates) == null ? void 0 : _a[String(color)]) == null ? void 0 : _b.resourceCards) == null ? void 0 : _c.cards) ?? [];
+      const cards2 = ((_c = (_b = (_a = this.state.playerStates) == null ? void 0 : _a[String(color)]) == null ? void 0 : _b.resourceCards) == null ? void 0 : _c.cards) ?? [];
       const known = {};
-      for (const id of cards) {
+      for (const id of cards2) {
         const r = CARD_ID[id];
         if (r) known[r] = (known[r] ?? 0) + 1;
       }
-      return { total: cards.length, known };
+      return { total: cards2.length, known };
     }
     /**
      * Player-trade offers awaiting OUR answer: offers from other players we
@@ -5102,17 +5280,17 @@ html.cc-docked-page {
       }
     }
     /** Produce a sendable frame for an action, or null if not learned yet. */
-    buildFrame(kind, coord, cards) {
+    buildFrame(kind, coord, cards2) {
       const tpl = this.templates[kind];
       if (!tpl) return null;
       const frame = JSON.parse(JSON.stringify(tpl.frame));
       if (tpl.cardsPath) {
-        if (!cards || cards.length === 0) return null;
-        if (tpl.cardsPath.length === 0) return [...cards];
+        if (!cards2 || cards2.length === 0) return null;
+        if (tpl.cardsPath.length === 0) return [...cards2];
         const leaf = tpl.cardsPath[tpl.cardsPath.length - 1];
         const parent = getAtPath(frame, tpl.cardsPath.slice(0, -1));
         if (!parent || typeof parent !== "object") return null;
-        parent[leaf] = [...cards];
+        parent[leaf] = [...cards2];
       }
       if (tpl.coordPath) {
         if (!coord) return null;
@@ -5766,7 +5944,10 @@ html.cc-docked-page {
       },
       players,
       deck: {
-        cardsLeft: 36 - deck.rollsIntoDeck,
+        estimated: true,
+        observedRolls: tracker.rolls.length,
+        historyComplete: tracker.rollHistoryComplete === true,
+        cardsLeft: deck.totalRemaining,
         due: deck.due,
         cold: deck.cold,
         prob: Object.fromEntries([...deck.prob.entries()].map(([n, p]) => [n, +(p * 100).toFixed(0)]))
@@ -5798,6 +5979,7 @@ html.cc-docked-page {
   let handLedger = null;
   let restoredHandSnapshot = null;
   let historyComplete = false;
+  let structuredLogActive = false;
   let planningRevision = 0;
   let planningCache = null;
   const journalKey = () => `catanCopilot:ledger:${location.href}`;
@@ -5823,7 +6005,7 @@ html.cc-docked-page {
       opponent.trackingReason = "Waiting for a complete private hand and opponent total";
       return;
     }
-    if (!rawEvents.has(0) || rawEvents.size !== lastProcessedIndex + 1) {
+    if (!structuredLogActive && (!rawEvents.has(0) || rawEvents.size !== lastProcessedIndex + 1)) {
       opponent.trackingHealth = historyComplete ? "repairing" : "incomplete";
       opponent.trackingReason = "Missing log rows; retained history must be completed before claiming an exact hand";
       return;
@@ -5843,6 +6025,7 @@ html.cc-docked-page {
       localStorage.setItem(journalKey(), JSON.stringify({
         board: boardKey(),
         complete: historyComplete,
+        source: structuredLogActive ? "server" : "dom",
         events: [...rawEvents],
         decisions: decisionHistory,
         snapshot: handLedger == null ? void 0 : handLedger.lastSnapshot
@@ -5862,8 +6045,8 @@ html.cc-docked-page {
       const before = previous.hands.find((p) => p.name === (opponent == null ? void 0 : opponent.name));
       if (played && !opponentTurn && (opponent == null ? void 0 : opponent.trackingHealth) === "exact" && before) {
         const resource = previous.decision.resource;
-        const cards = before.hand[resource] - opponent.hand[resource];
-        if (cards >= 0) previous.outcome = { confirmed: true, resource, cards, eventId: lastProcessedIndex };
+        const cards2 = before.hand[resource] - opponent.hand[resource];
+        if (cards2 >= 0) previous.outcome = { confirmed: true, resource, cards: cards2, eventId: lastProcessedIndex };
       }
     }
     decisionHistory.push({
@@ -5905,8 +6088,8 @@ html.cc-docked-page {
       p.serverCards = hand.total;
       p.serverVp = bridge.publicVp(color);
       if (color === myColor) {
-        const cards = (_c = (_b = (_a = bridge.state.playerStates) == null ? void 0 : _a[String(color)]) == null ? void 0 : _b.resourceCards) == null ? void 0 : _c.cards;
-        const exact = Array.isArray(cards) && cards.every((id) => id >= 1 && id <= 5);
+        const cards2 = (_c = (_b = (_a = bridge.state.playerStates) == null ? void 0 : _a[String(color)]) == null ? void 0 : _b.resourceCards) == null ? void 0 : _c.cards;
+        const exact = Array.isArray(cards2) && cards2.every((id) => id >= 1 && id <= 5);
         if (exact) for (const r of RESOURCES) p.hand[r] = hand.known[r] ?? 0;
         p.uncertainty = exact ? 0 : 1;
         p.trackingHealth = exact ? "exact" : "repairing";
@@ -6066,6 +6249,7 @@ html.cc-docked-page {
       const prev = prevTurnColor;
       bridge.apply(data.type, data.payload);
       if (tracker && (data.type === STATE_EVENT.INIT || data.type === STATE_EVENT.DIFF)) {
+        syncStructuredLog(data.type === STATE_EVENT.INIT);
         syncTrackerFromState();
         const turn = bridge.currentTurnColor;
         const myColor = bridge.myColor;
@@ -6091,18 +6275,46 @@ html.cc-docked-page {
     }
     scheduleRender();
   });
+  function syncStructuredLog(replace = false) {
+    const logs = bridge.state.gameLogState;
+    if (!tracker || !logs || !bridge.colorToName.size) return;
+    if (!structuredLogActive || replace) {
+      structuredLogActive = true;
+      rawEvents.clear();
+      handLedger = null;
+      restoredHandSnapshot = null;
+      lastProcessedIndex = -1;
+      tracker = createTracker(tracker.youName);
+      moveHistory.length = 0;
+    }
+    const parsed = Object.entries(logs).map(([id, entry]) => ({
+      id: Number(id),
+      event: parseStructuredLog(entry, bridge.colorToName, tracker.youName)
+    })).filter((e) => Number.isInteger(e.id) && e.id >= 0).sort((a, b) => a.id - b.id);
+    const startingPlayers = new Set(parsed.flatMap((e) => {
+      var _a;
+      return ((_a = e.event) == null ? void 0 : _a.type) === "starting-resources" ? [e.event.player] : [];
+    }));
+    historyComplete = logs["0"] !== void 0 && parsed.every((e) => e.event !== null) && startingPlayers.size === bridge.colorToName.size;
+    if (handLedger) handLedger.complete = historyComplete;
+    for (const { id, event } of parsed) processGameEvent(id, event ?? { type: "ignored" });
+    tracker.rollHistoryComplete = historyComplete;
+  }
   function processRow(el) {
-    if (!tracker) return;
+    if (!tracker || structuredLogActive) return;
     const idxAttr = el.getAttribute("data-index");
     if (idxAttr === null) return;
-    const idx = parseInt(idxAttr, 10);
-    if (Number.isNaN(idx)) return;
-    const ev = parseLogRow(el);
+    const idx = Number(idxAttr);
+    if (!Number.isInteger(idx) || idx < 0) return;
+    processGameEvent(idx, parseLogRow(el));
+  }
+  function processGameEvent(idx, ev) {
+    if (!tracker) return;
     const previous = rawEvents.get(idx);
     if (previous && JSON.stringify(previous) === JSON.stringify(ev)) return;
     lastProcessedIndex = Math.max(lastProcessedIndex, idx);
     rawEvents.set(idx, ev);
-    if (!historyComplete && rawEvents.has(0) && rawEvents.size === lastProcessedIndex + 1) {
+    if (!structuredLogActive && !historyComplete && rawEvents.has(0) && rawEvents.size === lastProcessedIndex + 1) {
       const paid = new Set([...rawEvents.values()].filter((e) => e.type === "starting-resources").map((e) => e.player));
       if (paid.size === 2) {
         historyComplete = true;
@@ -6112,6 +6324,7 @@ html.cc-docked-page {
     handLedger == null ? void 0 : handLedger.record(idx, ev);
     const rebuilt = createTracker(tracker.youName);
     for (const [, event] of [...rawEvents].sort(([a], [b]) => a - b)) applyEvent(rebuilt, event);
+    rebuilt.rollHistoryComplete = historyComplete && (structuredLogActive || rawEvents.size === lastProcessedIndex + 1);
     tracker = rebuilt;
     if (!previous || previous.type === "ignored") recordMove(ev);
     syncTrackerFromState();
@@ -6231,15 +6444,16 @@ html.cc-docked-page {
     trackerGameId = location.href;
     handLedger = null;
     restoredHandSnapshot = null;
+    structuredLogActive = false;
     rawEvents.clear();
     decisionHistory.length = 0;
     historyComplete = bridge.turnState === 0 && bridge.buildings.length < 3;
     try {
       const saved = JSON.parse(localStorage.getItem(journalKey()) ?? "null");
-      if ((saved == null ? void 0 : saved.board) === boardKey() && Array.isArray(saved.events)) {
+      if ((saved == null ? void 0 : saved.board) === boardKey() && Array.isArray(saved.decisions)) decisionHistory.push(...saved.decisions);
+      if ((saved == null ? void 0 : saved.board) === boardKey() && saved.source !== "server" && Array.isArray(saved.events)) {
         historyComplete = saved.complete === true;
         restoredHandSnapshot = saved.snapshot ?? null;
-        if (Array.isArray(saved.decisions)) decisionHistory.push(...saved.decisions);
         for (const [id, event] of saved.events) {
           rawEvents.set(id, event);
           applyEvent(tracker, event);
@@ -6292,19 +6506,9 @@ html.cc-docked-page {
         onDownloadGameLogs: downloadGameLogs
       });
     }
+    syncStructuredLog();
     sweepExistingRows(scroller);
-    observer = new MutationObserver((mutations) => {
-      for (const m of mutations) {
-        m.addedNodes.forEach((node) => {
-          var _a;
-          if (node instanceof Element) {
-            if (node.hasAttribute("data-index")) processRow(node);
-            else (_a = node.querySelectorAll) == null ? void 0 : _a.call(node, "[data-index]").forEach(processRow);
-          }
-        });
-      }
-    });
-    observer.observe(scroller, { childList: true, subtree: true });
+    observer = observeGameLog(scroller, processRow);
     scheduleRender();
   }
   function detach() {

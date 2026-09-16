@@ -394,7 +394,7 @@ describe("overlay", () => {
     const root = document.getElementById("catan-copilot")!;
     expect(root).toBeTruthy();
     const text = root.textContent!;
-    expect(text).toContain("Balanced-dice deck");
+    expect(text).toContain("Balanced-dice estimate");
     expect(text).toContain("Players");
     expect(text).toContain("Your strategy");
     expect(text).toContain("RECOMMENDED");

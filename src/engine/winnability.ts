@@ -48,6 +48,10 @@ export interface PlayerVictoryInput {
   knightsPlayed: number;
   /** their current longest continuous road (segments) */
   longestRoadLen: number;
+  /** Evidence used for conservative opponent threat bounds. */
+  handKnown?: boolean;
+  resourceCardCount?: number;
+  developmentCards?: number;
   hand: Hand;
   /** expected cards per roll, per resource */
   production: Hand;

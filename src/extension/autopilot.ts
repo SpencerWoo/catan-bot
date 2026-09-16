@@ -676,7 +676,8 @@ export function decideNext(opts: {
   const freeRoadChoices = (count: number) => evaluateBuilds(planning.options.filter((b) => b.roadEdges?.length).map((b) => {
     const free = Math.min(count, b.roadEdges!.length);
     return { ...b, cost: { ...b.cost, wood: (b.cost.wood ?? 0) - free, brick: (b.cost.brick ?? 0) - free } };
-  }), you.hand, planning.production, you.bankRatio, planning.remaining, planning.gap, planning.horizon);
+  }), you.hand, planning.production, you.bankRatio, planning.remaining, planning.gap, planning.horizon)
+    .sort((a, b) => Number(!!b.protectsBonus && b.wait === 0) - Number(!!a.protectsBonus && a.wait === 0) || b.score - a.score);
 
   // Road Building placement: a played card owes the game free roads — it
   // blocks everything else until they're placed. Follow the advised expansion
@@ -714,7 +715,7 @@ export function decideNext(opts: {
 
   // Knight discipline (from game-log analysis: 13 knights played was wasteful).
   // Play a knight ONLY to un-block your own tile, or to take/hold Largest Army
-  // when it MATTERS for the win — not greedily. Once you hold it, HOLD the rest.
+  // when it MATTERS for the win — not greedily. Defend an owned bonus when a late-game contender can overtake.
   // DON'T play if an opponent is already blocked — save it for when YOU are blocked.
   // Otherwise, use the robber as robber utility (block the strongest opponent).
   const knightReason = ((): string | null => {
@@ -732,10 +733,9 @@ export function decideNext(opts: {
             (h) => board.hexes[h].q === robberHex.x && board.hexes[h].r === robberHex.y,
           ),
       );
-    if (blockedMine) return "the robber is on your tile";
-
     return bonusTiming(planning.inputs, planning.victories,
-      planning.victories.find(p => p.isYou)?.target ?? opts.winTarget ?? 10, "largest-army", true);
+      planning.victories.find(p => p.isYou)?.target ?? opts.winTarget ?? 10, "largest-army", true)
+      ?? (blockedMine ? "the robber is on your tile" : null);
   })();
 
   // Knight timing: play it BEFORE rolling by default (move the robber / grow
@@ -800,7 +800,7 @@ export function decideNext(opts: {
       if (!allowed("build-road") || !hasPiece("road")) return null;
       const edge = board.edges[roads[0]];
       const coord = pixelsToColonistEdge(board.vertices[edge.a], board.vertices[edge.b]);
-      return coord ? { kind: "build-road", coord, describe: `road for funded ${choice.kind === "road" ? "Longest Road" : "settlement claim"}` } : null;
+      return coord ? { kind: "build-road", coord, describe: choice.protectsBonus ? "defend Longest Road against a late-game contender" : `road for funded ${choice.kind === "road" ? "Longest Road" : "settlement claim"}` } : null;
     }
     if (choice.vertexId === undefined) return null;
     const v = board.vertices[choice.vertexId];
@@ -816,13 +816,12 @@ export function decideNext(opts: {
     if (action) return finish(action);
   }
 
-  for (const choice of choices.filter(b => b.deniesWin && b.wait === 0)) {
-    const action = build(choice);
-    if (action) return finish(action);
-  }
+  const army = planning.inputs.find(p => p.isYou);
+  if (knightReason && army && !army.holdsLargestArmy && planning.gap <= 2 &&
+    army.knightsPlayed + 1 >= Math.max(3, 1 + Math.max(0, ...planning.inputs.filter(p => !p.isYou).map(p => p.knightsPlayed))))
+    return finish({ kind: "play-knight", describe: "play a knight — take Largest Army to win now" });
 
-  if (knightReason) return finish({ kind: "play-knight", describe: `play a knight — ${knightReason}` });
-
+  let monopolyAction: AutopilotDecision | null = null;
   if (opts.hasMonopoly && allowed("play-monopoly")) {
     const opponents = [...tracker.players.values()].filter((p) => p.name !== youName);
     const scoreHand = (hand: Record<Resource, number>, horizon = planning.horizon): number =>
@@ -831,12 +830,13 @@ export function decideNext(opts: {
     const futureHand = Object.fromEntries(RESOURCES.map((r) => [r, you.hand[r] + planning.production[r]])) as Record<Resource, number>;
     const laterHorizon = { ...planning.horizon, turns: Math.max(0, planning.horizon.turns - 1) };
     const futureBase = scoreHand(futureHand, laterHorizon);
-    let best: { resource: Resource; value: number; haul: number } | null = null;
+    let best: { resource: Resource; value: number; haul: number; urgent: boolean; wins: boolean } | null = null;
     let waitingValue = 0;
     for (const resource of RESOURCES) {
       const haul = confirmedMonopolyHaul(tracker.players.values(), youName, resource);
       const next = { ...you.hand, [resource]: you.hand[resource] + haul };
       let delay = 0;
+      let deniesImmediateFinish = false;
       let futureHaul = 0;
       for (const opponent of opponents) {
         const input = planning.inputs.find((p) => p.name === opponent.name);
@@ -845,23 +845,48 @@ export function decideNext(opts: {
         const rate = Object.fromEntries(RESOURCES.map((r) => [r, input.production[r] * (input.rollsPerTurn ?? 2)])) as Record<Resource, number>;
         const before = turnsToAfford(goal, opponent.hand, rate, opponent.bankRatio);
         const after = turnsToAfford(goal, { ...opponent.hand, [resource]: 0 }, rate, opponent.bankRatio);
+        if (haul > 0 && before === 0 && after > 0 &&
+          (planning.victories.find(p => p.name === opponent.name)?.turnsToWin ?? Infinity) <= 1)
+          deniesImmediateFinish = true;
         delay += Number.isFinite(before) ? Math.min(planning.horizon.turns + 1, Math.max(0, after - before)) : 0;
         const expected = Object.fromEntries(RESOURCES.map((r) => [r, opponent.hand[r] + rate[r]])) as Record<Resource, number>;
         // Expected next-turn spending consumes the very pile we might wait for.
         const spends = affordableWithTrades(expected, opponent.bankRatio, goal);
         futureHaul += Math.max(0, expected[resource] - (spends ? goal[resource] ?? 0 : 0));
       }
+      const afterBuilds = evaluateBuilds(choices, next, planning.production, you.bankRatio,
+        planning.remaining, planning.gap, planning.horizon);
+      const wins = haul > 0 && afterBuilds.some(b => b.wait === 0 && b.kind !== "dev" && b.vp >= planning.gap);
+      const urgent = wins || deniesImmediateFinish || haul > 0 && afterBuilds.some(b =>
+        b.wait === 0 && (b.deniesWin || b.protectsBonus));
       const value = scoreHand(next) - base + delay / (1 + planning.horizon.turns);
       const survival = planning.horizon.turns / (1 + planning.horizon.turns);
       const later = scoreHand({ ...futureHand, [resource]: futureHand[resource] + futureHaul }, laterHorizon) - futureBase;
       waitingValue = Math.max(waitingValue, survival * Math.max(0, later));
-      if (haul > 0 && (!best || value > best.value)) best = { resource, value, haul };
+      if (haul > 0 && (!best || Number(wins) > Number(best.wins) || wins === best.wins &&
+        (Number(urgent) > Number(best.urgent) || urgent === best.urgent && value > best.value)))
+        best = { resource, value, haul, urgent, wins };
     }
-    if (best && best.value > 0 && best.value + 1e-6 >= waitingValue) return finish({
-      kind: "play-monopoly", resource: best.resource,
-      describe: `play monopoly on ${best.resource} — ${best.haul} confirmed cards, more useful now than waiting`,
-    });
+    if (best && (best.urgent || best.value > 0 && best.value + 1e-6 >= waitingValue)) {
+      monopolyAction = { kind: "play-monopoly", resource: best.resource,
+        describe: `play monopoly on ${best.resource} — ${best.haul} confirmed cards, ${best.wins ? "funds victory now" : "more useful now than waiting"}` };
+      if (best.wins) return finish(monopolyAction);
+    }
   }
+
+  for (const choice of choices.filter(b => (b.deniesWin || b.protectsBonus) && b.wait === 0)) {
+    const action = build(choice);
+    if (action) return finish(action);
+  }
+
+  if (opts.hasRoadBuilding && allowed("play-road-building") && hasPiece("road") &&
+    freeRoadChoices(Math.min(2, pieces?.roads ?? 2)).some(b => b.protectsBonus && b.wait === 0))
+    return finish({ kind: "play-road-building", describe: "free roads defend Longest Road" });
+
+  if (knightReason?.startsWith("defend")) return finish({ kind: "play-knight", describe: `play a knight — ${knightReason}` });
+
+  if (monopolyAction) return finish(monopolyAction);
+  if (knightReason) return finish({ kind: "play-knight", describe: `play a knight — ${knightReason}` });
 
   if (top && opts.hasYearOfPlenty && allowed("play-year-of-plenty")) {
     let best: { resources: [Resource, Resource]; improvement: number } | null = null;
