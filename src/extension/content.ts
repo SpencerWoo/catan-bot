@@ -1,3 +1,5 @@
+import { parseStructuredLog } from "./structuredLog";
+import { observeGameLog } from "./observeGameLog";
 import { loadContinuationPref, saveContinuationPref } from "./continuationPreference";
 import { HandLedger, HandSnapshot, confirmedMonopolyHaul } from "./handLedger";
 import { PlanningContext, planPosition, settlementRoutes, roadBonusPath, planningAdvice, vertexIncome } from "./planning";
@@ -362,7 +364,10 @@ function buildLiveSummary(): unknown {
     },
     players,
     deck: {
-      cardsLeft: 36 - deck.rollsIntoDeck,
+      estimated: true,
+      observedRolls: tracker.rolls.length,
+      historyComplete: tracker.rollHistoryComplete === true,
+      cardsLeft: deck.totalRemaining,
       due: deck.due,
       cold: deck.cold,
       prob: Object.fromEntries([...deck.prob.entries()].map(([n, p]) => [n, +(p * 100).toFixed(0)])),
@@ -407,6 +412,7 @@ const decisionHistory: NonNullable<GameLog["decisions"]> = [];
 let handLedger: HandLedger | null = null;
 let restoredHandSnapshot: HandSnapshot | null = null;
 let historyComplete = false;
+let structuredLogActive = false;
 let planningRevision = 0;
 let planningCache: { revision: number; value: PlanningContext | null } | null = null;
 const journalKey = () => `catanCopilot:ledger:${location.href}`;
@@ -426,7 +432,7 @@ function syncLedger(): void {
     opponent.trackingReason = "Waiting for a complete private hand and opponent total";
     return;
   }
-  if (!rawEvents.has(0) || rawEvents.size !== lastProcessedIndex + 1) {
+  if (!structuredLogActive && (!rawEvents.has(0) || rawEvents.size !== lastProcessedIndex + 1)) {
     opponent.trackingHealth = historyComplete ? "repairing" : "incomplete";
     opponent.trackingReason = "Missing log rows; retained history must be completed before claiming an exact hand";
     return;
@@ -441,7 +447,7 @@ function syncLedger(): void {
 
 function persistJournal(): void {
   try { localStorage.setItem(journalKey(), JSON.stringify({ board: boardKey(), complete: historyComplete,
-    events: [...rawEvents], decisions: decisionHistory, snapshot: handLedger?.lastSnapshot })); } catch { /* export remains available */ }
+    source: structuredLogActive ? "server" : "dom", events: [...rawEvents], decisions: decisionHistory, snapshot: handLedger?.lastSnapshot })); } catch { /* export remains available */ }
 }
 
 function recordDecision(decision: AutopilotDecision): void {
@@ -708,6 +714,7 @@ window.addEventListener("message", (ev: MessageEvent) => {
     const prev = prevTurnColor;
     bridge.apply(data.type, data.payload);
     if (tracker && (data.type === STATE_EVENT.INIT || data.type === STATE_EVENT.DIFF)) {
+      syncStructuredLog(data.type === STATE_EVENT.INIT);
       syncTrackerFromState();
       const turn = bridge.currentTurnColor;
       const myColor = bridge.myColor;
@@ -737,19 +744,45 @@ window.addEventListener("message", (ev: MessageEvent) => {
   scheduleRender();
 });
 
+/** Consume server history as one source of truth. Never mix its IDs with DOM
+ * indices: private log variants make those index spaces diverge. */
+function syncStructuredLog(replace = false): void {
+  const logs = bridge.state.gameLogState;
+  if (!tracker || !logs || !bridge.colorToName.size) return;
+  if (!structuredLogActive || replace) {
+    structuredLogActive = true;
+    rawEvents.clear(); handLedger = null; restoredHandSnapshot = null;
+    lastProcessedIndex = -1;
+    tracker = createTracker(tracker.youName);
+    moveHistory.length = 0;
+  }
+  const parsed = Object.entries(logs).map(([id, entry]) => ({ id: Number(id),
+    event: parseStructuredLog(entry, bridge.colorToName, tracker!.youName) }))
+    .filter(e => Number.isInteger(e.id) && e.id >= 0).sort((a, b) => a.id - b.id);
+  const startingPlayers = new Set(parsed.flatMap(e => e.event?.type === "starting-resources" ? [e.event.player] : []));
+  historyComplete = logs["0"] !== undefined && parsed.every(e => e.event !== null) &&
+    startingPlayers.size === bridge.colorToName.size;
+  if (handLedger) handLedger.complete = historyComplete;
+  for (const { id, event } of parsed) processGameEvent(id, event ?? { type: "ignored" });
+  tracker.rollHistoryComplete = historyComplete;
+}
+
 function processRow(el: Element): void {
-  if (!tracker) return;
+  if (!tracker || structuredLogActive) return;
   const idxAttr = el.getAttribute("data-index");
   if (idxAttr === null) return;
-  const idx = parseInt(idxAttr, 10);
-  // The virtual scroller re-renders overlapping windows; <= skips replays.
-  if (Number.isNaN(idx)) return;
-  const ev = parseLogRow(el);
+  const idx = Number(idxAttr);
+  if (!Number.isInteger(idx) || idx < 0) return;
+  processGameEvent(idx, parseLogRow(el));
+}
+
+function processGameEvent(idx: number, ev: GameEvent): void {
+  if (!tracker) return;
   const previous = rawEvents.get(idx);
   if (previous && JSON.stringify(previous) === JSON.stringify(ev)) return;
   lastProcessedIndex = Math.max(lastProcessedIndex, idx);
   rawEvents.set(idx, ev);
-  if (!historyComplete && rawEvents.has(0) && rawEvents.size === lastProcessedIndex + 1) {
+  if (!structuredLogActive && !historyComplete && rawEvents.has(0) && rawEvents.size === lastProcessedIndex + 1) {
     const paid = new Set([...rawEvents.values()].filter((e) => e.type === "starting-resources").map((e) => (e as { player: string }).player));
     if (paid.size === 2) { historyComplete = true; if (handLedger) handLedger.complete = true; }
   }
@@ -758,6 +791,7 @@ function processRow(el: Element): void {
   // matters for development-card counts, the dice shoe and turn ownership.
   const rebuilt = createTracker(tracker.youName);
   for (const [, event] of [...rawEvents].sort(([a], [b]) => a - b)) applyEvent(rebuilt, event);
+  rebuilt.rollHistoryComplete = historyComplete && (structuredLogActive || rawEvents.size === lastProcessedIndex + 1);
   tracker = rebuilt;
   if (!previous || previous.type === "ignored") recordMove(ev);
   syncTrackerFromState();
@@ -898,15 +932,16 @@ function attach(scroller: HTMLElement): void {
   trackerGameId = location.href;
   handLedger = null;
   restoredHandSnapshot = null;
+  structuredLogActive = false;
   rawEvents.clear();
   decisionHistory.length = 0;
   historyComplete = bridge.turnState === 0 && bridge.buildings.length < 3;
   try {
     const saved = JSON.parse(localStorage.getItem(journalKey()) ?? "null");
-    if (saved?.board === boardKey() && Array.isArray(saved.events)) {
+    if (saved?.board === boardKey() && Array.isArray(saved.decisions)) decisionHistory.push(...saved.decisions);
+    if (saved?.board === boardKey() && saved.source !== "server" && Array.isArray(saved.events)) {
       historyComplete = saved.complete === true;
       restoredHandSnapshot = saved.snapshot ?? null;
-      if (Array.isArray(saved.decisions)) decisionHistory.push(...saved.decisions);
       for (const [id, event] of saved.events as Array<[number, GameEvent]>) {
         rawEvents.set(id, event); applyEvent(tracker, event);
       }
@@ -963,19 +998,10 @@ function attach(scroller: HTMLElement): void {
     });
   }
 
+  syncStructuredLog();
   sweepExistingRows(scroller);
 
-  observer = new MutationObserver((mutations) => {
-    for (const m of mutations) {
-      m.addedNodes.forEach((node) => {
-        if (node instanceof Element) {
-          if (node.hasAttribute("data-index")) processRow(node);
-          else node.querySelectorAll?.("[data-index]").forEach(processRow);
-        }
-      });
-    }
-  });
-  observer.observe(scroller, { childList: true, subtree: true });
+  observer = observeGameLog(scroller, processRow);
   scheduleRender();
 }
 

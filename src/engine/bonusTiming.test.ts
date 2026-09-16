@@ -58,3 +58,12 @@ it("does not treat unavailable road routes as preparation", () => {
   const p = { ...player(), publicVp: 8, longestRoadPath: null };
   expect(bonusTiming([p], [plan(p, [step("longest-road")])], 10, "longest-road")).toBeNull();
 });
+
+it('defends held Largest Army against a tied late-game contender, but does not spend on a safe lead', () => {
+  const me = { ...player(), publicVp: 7, knightsPlayed: 3, holdsLargestArmy: true };
+  const them = { ...player(), name: 'them', isYou: false, publicVp: 7, knightsPlayed: 3, developmentCards: 1 };
+  expect(bonusTiming([me, them], [], 10, 'largest-army', true)).toContain('defend');
+  expect(bonusTiming([me, { ...them, knightsPlayed: 2 }], [], 10, 'largest-army', true)).toBeNull();
+  expect(bonusTiming([{ ...me, playableKnights: 0 }, them], [], 10, 'largest-army', true)).toBeNull();
+  expect(bonusTiming([me, { ...them, developmentCards: 0 }], [], 10, 'largest-army', true)).toBeNull();
+});

@@ -10,10 +10,9 @@ you play and keeps up-to-date:
   the main game, and dashed segments for the next roads to lay toward spot ①.
 - **Card counting** — every player's hand, tracked through rolls, builds, trades,
   discards, monopolies, and steals (unknown steals show as `±n` uncertainty).
-- **Balanced-dice deck tracking** — colonist's balanced mode draws from the 36
-  two-die combinations like a card deck. The overlay counts the deck down, shows
-  which numbers are over-due or exhausted, and the probability your numbers hit
-  the next roll.
+- **Dice tracking** — observed rolls update from server log events. The balanced
+  deck bars and next-roll probabilities are explicitly labeled estimates:
+  shuffle timing is unknown, and partial history is identified in the panel.
 - **Strategy advice** — it learns each player's number→resource income table from
   the log, scores four predefined strategies (Road & Expand, Cities & Development,
   Port Monopoly, Balanced), forward-simulates each with balanced dice, and
@@ -96,25 +95,28 @@ with colonist's own scripts.
 
 Two read-only channels:
 
-1. **Game log (DOM).** Colonist renders its log as a virtual scroller of
-   `[data-index]` rows. The content script sweeps existing rows in index order
-   (so a mid-game refresh rebuilds full history), then follows new rows with a
-   MutationObserver. Rows are parsed by icon alt text (`dice_4`, `grain`,
-   `wool`, `lumber`, `settlement`, …) and text keywords ("rolled", "built a",
-   "gave bank … and took", "stole … from you", …). The signed-in player comes
-   from `.web-header-username`.
-2. **Board state (WebSocket).** `inject.js` runs in the page world, wraps
-   `window.WebSocket` before colonist connects, decodes the msgpack frames, and
-   forwards board-relevant events (board description type 14, build corner 16,
-   build edge 15, play order 8, player states 12) to the content script.
-   Colonist's hex-face coordinates are the same axial system the engine uses,
-   so tiles, ports, corners, and edges map 1:1 onto the tested board model in
-   `src/engine/` — which then scores placements on the real board.
+1. **Server state and log (WebSocket).** `inject.js` captures INIT (type 4)
+   and DIFF (type 91) messages. Stable server log IDs supply rolls and resource
+   events even when the virtualized on-screen log omits rows. The state bridge
+   supplies the board, our private hand, and opponents' authoritative card totals.
+   In 1v1, the conservation ledger reconstructs the opponent's resources and
+   checks both hands against those totals before claiming exact counts or
+   selecting a Monopoly target. Unsupported events keep confidence incomplete.
+2. **Game log fallback (DOM).** Without structured server logs, the content
+   script parses visible `[data-index]` rows and observes added/recycled rows,
+   changed text, and late icon attributes. Missing rows remain explicitly
+   incomplete. DOM indices and server IDs are never combined.
 
-Both channels' formats follow open-source colonist tooling — see Sources.
-If the extension is loaded mid-game the board frame has already passed;
-refresh the page and colonist resends it. The overlay says so when the board
-is missing, and all log-based features keep working without it.
+Load the extension before a game, or refresh to receive the server state.
+Public roll counts are observations; the remaining balanced-dice deck is a
+model, not an exact server-provided count.
+
+In the endgame, a verified immediate win takes priority. The planner also
+considers connected road extensions that preserve an owned Longest Road bonus
+against a late-game contender, including resource trades and Road Building,
+and plays available knights to defend Largest Army against a tied contender.
+Road threat searches cover up to three new roads and respect blockers and piece
+supply; uncertain opponent hands use conservative card-count bounds.
 
 ## Layout
 

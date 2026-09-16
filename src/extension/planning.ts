@@ -1,7 +1,7 @@
 import { GameState, PlayerId, RESOURCES, pips } from "../engine/types";
 import { isVertexBuildable, playerProduction } from "../engine/analysis";
 import { analyzeVictory, BUILD, Cost, Hand, PlayerVictoryInput, VictoryPlan } from "../engine/winnability";
-import { BuildEvaluation, BuildOption, evaluateBuilds, gameHorizon, Horizon } from "../engine/horizon";
+import { BuildEvaluation, BuildOption, evaluateBuilds, gameHorizon, Horizon, turnsToAfford } from "../engine/horizon";
 import { roadPathTo, PlacementAdvice, describeVertex } from "./placement";
 import { expectedProduction } from "./copilot";
 import { TrackerState, visibleVp } from "./tracker";
@@ -114,6 +114,37 @@ export function roadBonusPath(state: GameState, player: PlayerId, target: number
   return null;
 }
 
+/** Verify both the contender's extension and our cheapest retaining tie.
+ * Unknown hands use a card-count upper bound, never invented exact resources.
+ * Search remains bounded to three road placements on each side. */
+export function roadDefensePath(state: GameState, players: PlayerVictoryInput[], target: number): number[] | null {
+  const me = players.find(p => p.isYou);
+  if (!me?.holdsLongestRoad || me.playerId === undefined || !me.roadsLeft) return null;
+  let threatenedLength = me.longestRoadLen;
+  for (const opponent of players) {
+    if (opponent.isYou || opponent.playerId === undefined ||
+      opponent.publicVp + (opponent.hiddenVp ?? 0) + 2 < target - 3) continue;
+    const expected = Object.fromEntries(RESOURCES.map(r => [r,
+      opponent.hand[r] + opponent.production[r] * (opponent.rollsPerTurn ?? players.length)])) as Hand;
+    const ceiling = state.roads.filter(r => r.player === opponent.playerId).length + Math.min(3, opponent.roadsLeft ?? 0);
+    // Joining two existing branches may add more than one length per new road.
+    for (let length = ceiling; length > threatenedLength; length--) {
+      if (length <= threatenedLength) continue;
+      const path = roadBonusPath(state, opponent.playerId as PlayerId, length, opponent.roadsLeft ?? 0);
+      if (!path?.length) continue;
+      const free = (opponent.developmentCards ?? 0) > 0 ? 2 : 0;
+      const paid = Math.max(0, path.length - free);
+      const possible = opponent.handKnown !== false
+        ? turnsToAfford({ wood: paid, brick: paid }, expected, zeroHand(), opponent.bankRatios) === 0
+        : (opponent.resourceCardCount ?? 0) + RESOURCES.reduce((n, r) => n +
+          opponent.production[r] * (opponent.rollsPerTurn ?? players.length), 0) >= paid * 2;
+      if (possible) { threatenedLength = length; break; }
+    }
+  }
+  return threatenedLength > me.longestRoadLen
+    ? roadBonusPath(state, me.playerId as PlayerId, threatenedLength, me.roadsLeft) : null;
+}
+
 export function planPosition(tracker: TrackerState, youName: string,
   gs: { state: GameState; youPlayer: PlayerId | null } | null, opts: PlanningOptions = {}): PlanningContext {
   const target = opts.target ?? 10;
@@ -149,6 +180,12 @@ export function planPosition(tracker: TrackerState, youName: string,
     p.holdsLargestArmy ??= mostKnights >= 3 && p.knightsPlayed === mostKnights && inputs.filter((x) => x.knightsPlayed === mostKnights).length === 1;
     p.holdsLongestRoad ??= mostRoads >= 5 && p.longestRoadLen === mostRoads && inputs.filter((x) => x.longestRoadLen === mostRoads).length === 1;
   }
+  for (const p of inputs) {
+    const tracked = tracker.players.get(p.name);
+    p.handKnown ??= tracked?.trackingHealth === "exact";
+    p.resourceCardCount ??= tracked?.serverCards ?? RESOURCES.reduce((n, r) => n + p.hand[r], 0);
+    p.developmentCards ??= tracked?.devCards ?? 0;
+  }
   const victories = analyzeVictory(inputs, { target, devDeckLeft: opts.devDeckLeft ?? null });
   const horizon = gameHorizon(victories.map((v) => v.turnsToWin));
   const me = inputs.find((p) => p.isYou)!;
@@ -178,6 +215,9 @@ export function planPosition(tracker: TrackerState, youName: string,
         cost: { wood: 1 + route.edges.length, brick: 1 + route.edges.length, wheat: 1, sheep: 1 },
         production: vertexIncome(gs.state, route.vertexId, rolls), vertexId: route.vertexId, roadEdges: route.edges, ratios });
     }
+    const defense = roadDefensePath(gs.state, inputs, target);
+    if (defense?.length) options.push({ kind: "road", vp: 0, protectsBonus: true,
+      cost: { wood: defense.length, brick: defense.length }, production: zeroHand(), roadEdges: defense });
     const roadReason = bonusTiming(inputs, victories, target, "longest-road");
     if (me.longestRoadPath?.length && roadReason) options.push({ kind: "road", vp: 2,
       deniesWin: roadReason.startsWith("deny"),

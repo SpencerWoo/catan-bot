@@ -39,6 +39,8 @@ export interface TrackerState {
   /** the signed-in user's colonist name, from the page header */
   youName: string | null;
   rolls: number[];
+  /** All opening and subsequent log evidence was captured. */
+  rollHistoryComplete?: boolean;
   /** rolls since the last assumed balanced-deck reshuffle */
   rollsThisDeck: number[];
   lastRoll: { player: string; total: number } | null;

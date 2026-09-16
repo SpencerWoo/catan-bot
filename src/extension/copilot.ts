@@ -6,23 +6,17 @@ import { PlayerState, TrackerState, handTotal, visibleVp } from "./tracker";
 
 // ---------------------------------------------------------------- dice deck
 
-/**
- * Colonist.io's balanced dice draws WITHOUT replacement from the 36 two-die
- * combinations, but refills+reshuffles while a few cards are still unplayed
- * (modeled as discardAt = 4 in engine/simulate.ts). Consequences:
- *  - Mid-shoe, deficits are exploitable: a number that has appeared its full
- *    count cannot come up again until the refill.
- *  - Near the bottom of the shoe (totalRemaining <= SHOE_REFILL_BELOW) the
- *    refill may already have happened — treating a cold number as probability
- *    ZERO is overconfident and wrong. We snap to a fresh-shoe view instead.
- */
+/** Assumed 36-combination shoe model, not an observed server deck.
+ * Shuffle timing is not exposed by the captured protocol. Counts, depleted
+ * totals and next-roll probabilities below are conditional model estimates.
+ * Near the assumed refill boundary we show a fresh-shoe estimate. */
 const SHOE_REFILL_BELOW = 5;
 
 export interface DeckStatus {
   /** cards left in the assumed deck for each total 2..12 */
   remaining: Map<number, number>;
   totalRemaining: number;
-  /** probability the next roll is each total */
+  /** Estimated probability under the assumed shoe model. */
   prob: Map<number, number>;
   /** totals that are over-due vs. their base rate */
   due: number[];

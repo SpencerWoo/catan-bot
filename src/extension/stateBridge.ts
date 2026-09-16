@@ -45,6 +45,7 @@ interface EdgeState { x: number; y: number; z: number; owner?: number }
 interface PortState { x: number; y: number; z: number; type: number }
 interface TileState { x: number; y: number; type: number; diceNumber: number }
 interface GameStateShape {
+  gameLogState?: Record<string, import("./structuredLog").StructuredLogEntry>;
   diceState?: { diceThrown?: boolean; dice1?: number; dice2?: number };
   currentState?: CurrentState;
   mapState?: {
