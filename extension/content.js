@@ -1097,18 +1097,18 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
     return null;
   }
   function spotContest(state, youPlayer, vertexId) {
-    const ourPath = roadPathTo(state, youPlayer, vertexId);
-    const ourLen = ourPath.length;
+    const ourPath = reachableRoadPath(state, youPlayer, vertexId);
+    const ourLen = (ourPath == null ? void 0 : ourPath.length) ?? Infinity;
     const opponents = new Set(
       state.buildings.map((b) => b.player).filter((p) => p !== youPlayer)
     );
     let oppLen = null;
     for (const op of opponents) {
-      const path = roadPathTo(state, op, vertexId);
-      if (path.length === 0) continue;
+      const path = reachableRoadPath(state, op, vertexId);
+      if (path === null) continue;
       if (oppLen === null || path.length < oppLen) oppLen = path.length;
     }
-    if (oppLen === null || ourPath.length === 0) {
+    if (oppLen === null || ourLen === 0) {
       return { losing: false, tied: false, ourLen, oppLen };
     }
     return { losing: oppLen < ourLen, tied: oppLen === ourLen, ourLen, oppLen };
@@ -1121,6 +1121,9 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
     return `${parts.join(" + ") || "coastal"} (${total2} pips${port})`;
   }
   function roadPathTo(state, player, target, fromVertices) {
+    return reachableRoadPath(state, player, target, fromVertices) ?? [];
+  }
+  function reachableRoadPath(state, player, target, fromVertices) {
     const sources = /* @__PURE__ */ new Set();
     if (fromVertices) {
       for (const v of fromVertices) sources.add(v);
@@ -1134,7 +1137,7 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
         }
       }
     }
-    if (sources.size === 0) return [];
+    if (sources.size === 0) return null;
     const blocked = new Set(
       state.buildings.filter((b) => b.player !== player).map((b) => b.vertexId)
     );
@@ -1157,7 +1160,7 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
         queue.push(n);
       }
     }
-    if (!seen.has(target)) return [];
+    if (!seen.has(target)) return null;
     const path = [];
     let cur = target;
     while (prev.has(cur)) {
@@ -1263,18 +1266,8 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
     for (const r of state.roads) if (r.player !== you) opps.add(r.player);
     let best = Infinity;
     for (const opp of opps) {
-      const from = /* @__PURE__ */ new Set();
-      for (const b of state.buildings) if (b.player === opp) from.add(b.vertexId);
-      for (const r of state.roads) {
-        if (r.player === opp) {
-          const e = state.board.edges[r.edgeId];
-          from.add(e.a);
-          from.add(e.b);
-        }
-      }
-      if (from.has(target)) return 0;
-      const path = roadPathTo(state, opp, target, [...from]);
-      if (path.length > 0) best = Math.min(best, path.length);
+      const path = reachableRoadPath(state, opp, target);
+      if (path !== null) best = Math.min(best, path.length);
     }
     return best;
   }
@@ -1571,6 +1564,39 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
     }
     parts.push("</svg>");
     return parts.join("");
+  }
+  function settlementRoadThreats(state, player, target, path) {
+    const sites = /* @__PURE__ */ new Map();
+    for (const id of path) {
+      const edge = state.board.edges[id];
+      sites.set(edge.a, "route-cut");
+      sites.set(edge.b, "route-cut");
+    }
+    for (const id of state.board.vertices[target].adjacent) sites.set(id, "adjacent-settlement");
+    sites.set(target, "destination");
+    const opponents = new Set(state.buildings.filter((b) => b.player !== player).map((b) => b.player));
+    const threats = [];
+    for (const [vertexId, reason] of sites) {
+      if (!isVertexBuildable(state, vertexId)) continue;
+      for (const opponent of opponents) {
+        if (state.buildings.filter((b) => b.player === opponent && b.kind === "settlement").length >= 5) continue;
+        const route = reachableRoadPath(state, opponent, vertexId);
+        if (route !== null && route.length <= path.length && route.length <= 15 - state.roads.filter((r) => r.player === opponent).length) {
+          threats.push({ opponent, vertexId, roadsNeeded: route.length, reason });
+        }
+      }
+    }
+    return threats;
+  }
+  function opponentCutSites(state, player) {
+    const sites = [];
+    const network = new Set(state.roads.filter((r) => r.player === player).flatMap((r) => [state.board.edges[r.edgeId].a, state.board.edges[r.edgeId].b]));
+    for (const road of state.roads) if (road.player !== player && state.buildings.filter((b) => b.player === road.player && b.kind === "settlement").length < 5) {
+      for (const vertexId of [state.board.edges[road.edgeId].a, state.board.edges[road.edgeId].b]) {
+        if (network.has(vertexId) && isVertexBuildable(state, vertexId) && !sites.some((s) => s.vertexId === vertexId && s.player === road.player)) sites.push({ vertexId, player: road.player });
+      }
+    }
+    return sites;
   }
   const DECK_CYCLE = 32;
   function createTracker(youName) {
@@ -2392,7 +2418,8 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
             best,
             Object.values(r.production ?? {}).reduce((n, x) => n + x, 0) / (1 + r.edges.length)
           ), 0);
-          winners.push({ path, access });
+          const retained = Math.min(length, ...opponentCutSites(trial, player).map((site) => longestRoad({ ...trial, buildings: [...trial.buildings, { ...site, kind: "settlement" }] }, player)));
+          winners.push({ path, access, retained });
           continue;
         }
         const nodes = new Set(trial.roads.filter((r) => r.player === player).flatMap((r) => [state.board.edges[r.edgeId].a, state.board.edges[r.edgeId].b]));
@@ -2401,7 +2428,7 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
           next.push({ path: [...path, edge.id], length });
         }
       }
-      if (winners.length) return winners.sort((a, b) => b.access - a.access)[0].path;
+      if (winners.length) return winners.sort((a, b) => b.retained - a.retained || b.access - a.access)[0].path;
       const seen = /* @__PURE__ */ new Set();
       frontier = next.sort((a, b) => b.length - a.length).filter((x) => {
         const key = [...x.path].sort((a, b) => a - b).join(",");
@@ -3271,7 +3298,7 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
     return best;
   }
   function decideNext(opts) {
-    var _a, _b, _c, _d, _e, _f, _g, _h, _i, _j, _k, _l, _m;
+    var _a, _b, _c, _d, _e, _f, _g, _h, _i, _j, _k, _l, _m, _n;
     const { tracker: tracker2, youName, fit, gs, advice, rolledThisTurn, robberPending, robberHex, discardPending } = opts;
     const you = tracker2.players.get(youName);
     if (!you) return null;
@@ -3309,15 +3336,25 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
       }
       return null;
     }
+    const roadThreats = /* @__PURE__ */ new Map();
+    if (gs && gs.youPlayer !== null) for (const b of planning.options) {
+      if (b.kind === "settlement" && b.vertexId !== void 0 && ((_b = b.roadEdges) == null ? void 0 : _b.length)) {
+        roadThreats.set(b.vertexId, settlementRoadThreats(gs.state, gs.youPlayer, b.vertexId, b.roadEdges));
+      }
+    }
+    const mayCommitRoads = (b) => {
+      var _a2;
+      return b.kind !== "settlement" || !((_a2 = roadThreats.get(b.vertexId)) == null ? void 0 : _a2.length) || affordableWithTrades(you.hand, you.bankRatio, b.cost);
+    };
     const freeRoadChoices = (count) => evaluateBuilds(planning.options.filter((b) => {
       var _a2;
       return (_a2 = b.roadEdges) == null ? void 0 : _a2.length;
     }).map((b) => {
       const free = Math.min(count, b.roadEdges.length);
       return { ...b, cost: { ...b.cost, wood: (b.cost.wood ?? 0) - free, brick: (b.cost.brick ?? 0) - free } };
-    }), you.hand, planning.production, you.bankRatio, planning.remaining, planning.gap, planning.horizon).sort((a, b) => Number(!!b.protectsBonus && b.wait === 0) - Number(!!a.protectsBonus && a.wait === 0) || b.score - a.score);
+    }).filter(mayCommitRoads), you.hand, planning.production, you.bankRatio, planning.remaining, planning.gap, planning.horizon).sort((a, b) => Number(!!opts.funding && b.kind === opts.funding.kind && b.vertexId === opts.funding.vertexId) - Number(!!opts.funding && a.kind === opts.funding.kind && a.vertexId === opts.funding.vertexId) || Number(!!b.protectsBonus && b.wait === 0) - Number(!!a.protectsBonus && a.wait === 0) || b.score - a.score);
     if ((opts.freeRoadsPending ?? 0) > 0 && board && gs && gs.youPlayer !== null) {
-      const advised = (((_b = freeRoadChoices(opts.freeRoadsPending)[0]) == null ? void 0 : _b.roadEdges) ?? (advice == null ? void 0 : advice.roadEdges) ?? []).find(
+      const advised = (((_c = freeRoadChoices(opts.freeRoadsPending)[0]) == null ? void 0 : _c.roadEdges) ?? []).find(
         (id) => !gs.state.roads.some((r) => r.edgeId === id)
       );
       const edgeId = advised ?? bestFreeRoadEdge(gs.state, gs.youPlayer);
@@ -3382,6 +3419,16 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
     const evaluation = {
       horizon: planning.horizon.turns,
       gap: planning.gap,
+      roadCommitments: choices.filter((b) => b.vertexId !== void 0 && roadThreats.has(b.vertexId)).map((b) => {
+        var _a2;
+        return {
+          vertexId: b.vertexId,
+          threats: roadThreats.get(b.vertexId),
+          requiresFullFunding: !!((_a2 = roadThreats.get(b.vertexId)) == null ? void 0 : _a2.length),
+          funded: affordableWithTrades(you.hand, you.bankRatio, b.cost),
+          cost: b.cost
+        };
+      }),
       alternatives: choices.slice(0, 8).map((b) => ({ kind: b.kind, score: b.score, wait: b.wait, vertexId: b.vertexId }))
     };
     const finish = (decision) => {
@@ -3416,7 +3463,7 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
         if (!allowed("build-road") || !hasPiece("road")) return null;
         const edge = board.edges[roads[0]];
         const coord2 = pixelsToColonistEdge(board.vertices[edge.a], board.vertices[edge.b]);
-        return coord2 ? { kind: "build-road", coord: coord2, describe: choice.protectsBonus ? "defend Longest Road against a late-game contender" : `road for funded ${choice.kind === "road" ? "Longest Road" : "settlement claim"}` } : null;
+        return coord2 ? { kind: "build-road", coord: coord2, funding: { kind: choice.kind, vertexId: choice.vertexId }, describe: choice.protectsBonus ? "defend Longest Road against a late-game contender" : `road for funded ${choice.kind === "road" ? "Longest Road" : "settlement claim"}` } : null;
       }
       if (choice.vertexId === void 0) return null;
       const v = board.vertices[choice.vertexId];
@@ -3454,11 +3501,11 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
         for (const opponent of opponents) {
           const input = planning.inputs.find((p) => p.name === opponent.name);
           if (!input) continue;
-          const goal = ((_d = (_c = planning.victories.find((p) => p.name === opponent.name)) == null ? void 0 : _c.steps[0]) == null ? void 0 : _d.cost) ?? BUILD_COSTS.city;
+          const goal = ((_e = (_d = planning.victories.find((p) => p.name === opponent.name)) == null ? void 0 : _d.steps[0]) == null ? void 0 : _e.cost) ?? BUILD_COSTS.city;
           const rate = Object.fromEntries(RESOURCES.map((r) => [r, input.production[r] * (input.rollsPerTurn ?? 2)]));
           const before = turnsToAfford(goal, opponent.hand, rate, opponent.bankRatio);
           const after = turnsToAfford(goal, { ...opponent.hand, [resource]: 0 }, rate, opponent.bankRatio);
-          if (haul > 0 && before === 0 && after > 0 && (((_e = planning.victories.find((p) => p.name === opponent.name)) == null ? void 0 : _e.turnsToWin) ?? Infinity) <= 1)
+          if (haul > 0 && before === 0 && after > 0 && (((_f = planning.victories.find((p) => p.name === opponent.name)) == null ? void 0 : _f.turnsToWin) ?? Infinity) <= 1)
             deniesImmediateFinish = true;
           delay += Number.isFinite(before) ? Math.min(planning.horizon.turns + 1, Math.max(0, after - before)) : 0;
           const expected = Object.fromEntries(RESOURCES.map((r) => [r, opponent.hand[r] + rate[r]]));
@@ -3519,15 +3566,15 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
     if (opts.hasRoadBuilding && allowed("play-road-building") && hasPiece("road")) {
       const free = freeRoadChoices(Math.min(2, (pieces == null ? void 0 : pieces.roads) ?? 2))[0];
       if (free && free.score > ((top == null ? void 0 : top.score) ?? 0) && free.wait < planning.horizon.turns) {
-        return finish({ kind: "play-road-building", describe: `free roads accelerate the planned ${free.kind}` });
+        return finish({ kind: "play-road-building", funding: { kind: free.kind, vertexId: free.vertexId }, describe: `free roads accelerate the planned ${free.kind}` });
       }
     }
     const income = discardIncome(tracker2, gs, opts.robberHex);
     const savingRolls = Math.max(2, tracker2.players.size);
     const loss = (hand) => expectedDiscardLoss(tracker2, hand, limit, savingRolls, income);
-    if (top && loss(you.hand) > 0 && (!funded || ((_f = opts.funding) == null ? void 0 : _f.partial))) {
+    if (top && loss(you.hand) > 0 && (!funded || ((_g = opts.funding) == null ? void 0 : _g.partial))) {
       const raw = evaluateBuilds(
-        ((_g = opts.funding) == null ? void 0 : _g.partial) && funded ? [funded] : choices,
+        ((_h = opts.funding) == null ? void 0 : _h.partial) && funded ? [funded] : choices,
         you.hand,
         planning.production,
         you.bankRatio,
@@ -3546,7 +3593,7 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
         const hand = { ...you.hand };
         let conversion = 0;
         let partial = false;
-        if (!action && ((_h = choice.roadEdges) == null ? void 0 : _h.length) && afford("road") && allowed("build-road") && hasPiece("road") && gs && board) {
+        if (!action && mayCommitRoads(choice) && ((_i = choice.roadEdges) == null ? void 0 : _i.length) && afford("road") && allowed("build-road") && hasPiece("road") && gs && board) {
           const edge = board.edges[choice.roadEdges[0]];
           const coord = pixelsToColonistEdge(board.vertices[edge.a], board.vertices[edge.b]);
           if (coord) action = {
@@ -3556,7 +3603,7 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
           };
         }
         if (action) {
-          if ((_i = choice.roadEdges) == null ? void 0 : _i.length) {
+          if ((_j = choice.roadEdges) == null ? void 0 : _j.length) {
             if (action.trade) {
               hand[action.trade.give] -= action.trade.giveCount;
               hand[action.trade.get]++;
@@ -3590,10 +3637,10 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
           };
         }
         if (!action) continue;
-        const stagedRoad = action.kind === "build-road" && !!((_j = choice.roadEdges) == null ? void 0 : _j.length);
+        const stagedRoad = action.kind === "build-road" && !!((_k = choice.roadEdges) == null ? void 0 : _k.length);
         const competing = partial || choice === save ? save : raw.find((b) => b !== choice);
         const competingCost = { ...competing == null ? void 0 : competing.cost };
-        if (stagedRoad && ((_k = competing == null ? void 0 : competing.roadEdges) == null ? void 0 : _k.includes(choice.roadEdges[0]))) {
+        if (stagedRoad && ((_l = competing == null ? void 0 : competing.roadEdges) == null ? void 0 : _l.includes(choice.roadEdges[0]))) {
           competingCost.wood = (competingCost.wood ?? 0) - 1;
           competingCost.brick = (competingCost.brick ?? 0) - 1;
         }
@@ -3616,7 +3663,7 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
           constructionDelay = Number.isFinite(after.wait) ? Math.max(0, after.wait - save.wait) : null;
         }
         let nextIncome = income;
-        if (!partial && !((_l = choice.roadEdges) == null ? void 0 : _l.length) && gs && gs.youPlayer !== null && choice.vertexId !== void 0 && (choice.kind === "city" || choice.kind === "settlement")) {
+        if (!partial && !((_m = choice.roadEdges) == null ? void 0 : _m.length) && gs && gs.youPlayer !== null && choice.vertexId !== void 0 && (choice.kind === "city" || choice.kind === "settlement")) {
           const buildings = choice.kind === "city" ? gs.state.buildings.map((b) => b.vertexId === choice.vertexId ? { ...b, kind: "city" } : b) : [...gs.state.buildings, { vertexId: choice.vertexId, player: gs.youPlayer, kind: "settlement" }];
           nextIncome = discardIncome(tracker2, { ...gs, state: { ...gs.state, buildings } }, opts.robberHex);
         }
@@ -3651,7 +3698,7 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
     if (top && !deliberateHold) {
       const action = build(top);
       if (action) return finish(action);
-      if (((_m = top.roadEdges) == null ? void 0 : _m.length) && top.wait < planning.horizon.turns && afford("road") && allowed("build-road") && hasPiece("road") && gs && board) {
+      if (mayCommitRoads(top) && ((_n = top.roadEdges) == null ? void 0 : _n.length) && top.wait < planning.horizon.turns && afford("road") && allowed("build-road") && hasPiece("road") && gs && board) {
         const edge = board.edges[top.roadEdges[0]];
         const coord = pixelsToColonistEdge(board.vertices[edge.a], board.vertices[edge.b]);
         if (coord) return finish({

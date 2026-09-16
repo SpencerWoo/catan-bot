@@ -67,18 +67,18 @@ export function spotContest(
   youPlayer: PlayerId,
   vertexId: number,
 ): { losing: boolean; tied: boolean; ourLen: number; oppLen: number | null } {
-  const ourPath = roadPathTo(state, youPlayer, vertexId);
-  const ourLen = ourPath.length;
+  const ourPath = reachableRoadPath(state, youPlayer, vertexId);
+  const ourLen = ourPath?.length ?? Infinity;
   const opponents = new Set(
     state.buildings.map((b) => b.player).filter((p) => p !== youPlayer),
   );
   let oppLen: number | null = null;
   for (const op of opponents) {
-    const path = roadPathTo(state, op, vertexId);
-    if (path.length === 0) continue;
+    const path = reachableRoadPath(state, op, vertexId);
+    if (path === null) continue;
     if (oppLen === null || path.length < oppLen) oppLen = path.length;
   }
-  if (oppLen === null || ourPath.length === 0) {
+  if (oppLen === null || ourLen === 0) {
     return { losing: false, tied: false, ourLen, oppLen };
   }
   return { losing: oppLen < ourLen, tied: oppLen === ourLen, ourLen, oppLen };
@@ -107,6 +107,13 @@ export function roadPathTo(
   target: number,
   fromVertices?: number[],
 ): number[] {
+  return reachableRoadPath(state, player, target, fromVertices) ?? [];
+}
+
+/** null means unreachable; [] means already connected. */
+export function reachableRoadPath(
+  state: GameState, player: PlayerId, target: number, fromVertices?: number[],
+): number[] | null {
   const sources = new Set<number>();
   if (fromVertices) {
     for (const v of fromVertices) sources.add(v);
@@ -120,7 +127,7 @@ export function roadPathTo(
       }
     }
   }
-  if (sources.size === 0) return [];
+  if (sources.size === 0) return null;
 
   const blocked = new Set(
     state.buildings.filter((b) => b.player !== player).map((b) => b.vertexId),
@@ -145,7 +152,7 @@ export function roadPathTo(
       queue.push(n);
     }
   }
-  if (!seen.has(target)) return [];
+  if (!seen.has(target)) return null;
   const path: number[] = [];
   let cur = target;
   while (prev.has(cur)) {
@@ -308,18 +315,8 @@ export function opponentDistance(state: GameState, you: PlayerId, target: number
   for (const r of state.roads) if (r.player !== you) opps.add(r.player);
   let best = Infinity;
   for (const opp of opps) {
-    const from = new Set<number>();
-    for (const b of state.buildings) if (b.player === opp) from.add(b.vertexId);
-    for (const r of state.roads) {
-      if (r.player === opp) {
-        const e = state.board.edges[r.edgeId];
-        from.add(e.a);
-        from.add(e.b);
-      }
-    }
-    if (from.has(target)) return 0;
-    const path = roadPathTo(state, opp, target, [...from]);
-    if (path.length > 0) best = Math.min(best, path.length);
+    const path = reachableRoadPath(state, opp, target);
+    if (path !== null) best = Math.min(best, path.length);
   }
   return best;
 }
