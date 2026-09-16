@@ -1,3 +1,4 @@
+import { opponentCutSites } from "./roadContest";
 import { GameState, PlayerId, RESOURCES, pips } from "../engine/types";
 import { isVertexBuildable, playerProduction } from "../engine/analysis";
 import { analyzeVictory, BUILD, Cost, Hand, PlayerVictoryInput, VictoryPlan } from "../engine/winnability";
@@ -82,18 +83,21 @@ export function roadBonusPath(state: GameState, player: PlayerId, target: number
   const blocked = new Set(state.buildings.filter((b) => b.player !== player).map((b) => b.vertexId));
   for (let depth = 0; depth <= Math.min(3, supply); depth++) {
     const next: Array<{ path: number[]; length: number }> = [];
-    const winners: Array<{ path: number[]; access: number }> = [];
+    const winners: Array<{ path: number[]; access: number; retained: number }> = [];
     for (const path of frontier) {
       const trial = { ...state, roads: [...state.roads, ...path.map((edgeId) => ({ edgeId, player }))] };
       const length = longestRoad(trial, player);
       if (length >= target) {
-        // Among equally short bonus routes, keep useful settlement access.
+        // Among equally short bonus routes, prefer resistance to settlement cuts,
+        // then useful settlement access.
         // Never spend an extra piece just to make an uncontested road longer.
         const access = settlementRoutes(trial, player)
           .filter(r => r.edges.length <= supply - path.length)
           .reduce((best, r) => Math.max(best,
             Object.values(r.production ?? {}).reduce((n, x) => n + x, 0) / (1 + r.edges.length)), 0);
-        winners.push({ path, access });
+        const retained = Math.min(length, ...opponentCutSites(trial, player).map(site =>
+          longestRoad({ ...trial, buildings: [...trial.buildings, { ...site, kind: "settlement" }] }, player)));
+        winners.push({ path, access, retained });
         continue;
       }
       const nodes = new Set(trial.roads.filter((r) => r.player === player).flatMap((r) => [state.board.edges[r.edgeId].a, state.board.edges[r.edgeId].b]));
@@ -103,7 +107,7 @@ export function roadBonusPath(state: GameState, player: PlayerId, target: number
         next.push({ path: [...path, edge.id], length });
       }
     }
-    if (winners.length) return winners.sort((a, b) => b.access - a.access)[0].path;
+    if (winners.length) return winners.sort((a, b) => b.retained - a.retained || b.access - a.access)[0].path;
     const seen = new Set<string>();
     frontier = next.sort((a, b) => b.length - a.length).filter((x) => {
       const key = [...x.path].sort((a, b) => a - b).join(",");

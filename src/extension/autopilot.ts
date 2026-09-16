@@ -1,3 +1,4 @@
+import { RoadThreat, settlementRoadThreats } from "./roadContest";
 import { GameState, PlayerId, RESOURCES, Resource, pips } from "../engine/types";
 import { vertexPips } from "../engine/board";
 import { evaluateBuilds, turnsToAfford, BuildEvaluation } from "../engine/horizon";
@@ -52,6 +53,7 @@ export interface AutopilotDecision {
     horizon: number;
     gap: number;
     alternatives: Array<{ kind: string; score: number; wait: number; vertexId?: number }>;
+    roadCommitments?: Array<{ vertexId: number; threats: RoadThreat[]; requiresFullFunding: boolean; funded: boolean; cost: BuildEvaluation["cost"] }>;
     spending?: {
       savedLoss: number; // cards expected to be discarded before spending again
       savingScore: number;
@@ -673,17 +675,28 @@ export function decideNext(opts: {
     return null; // no useful tile — let the human decide
   }
 
+  const roadThreats = new Map<number, RoadThreat[]>();
+  if (gs && gs.youPlayer !== null) for (const b of planning.options) {
+    if (b.kind === "settlement" && b.vertexId !== undefined && b.roadEdges?.length) {
+      roadThreats.set(b.vertexId, settlementRoadThreats(gs.state, gs.youPlayer, b.vertexId, b.roadEdges));
+    }
+  }
+  const mayCommitRoads = (b: Pick<BuildEvaluation, "kind" | "vertexId" | "cost">): boolean =>
+    b.kind !== "settlement" || !roadThreats.get(b.vertexId!)?.length ||
+    affordableWithTrades(you.hand, you.bankRatio, b.cost);
+
   const freeRoadChoices = (count: number) => evaluateBuilds(planning.options.filter((b) => b.roadEdges?.length).map((b) => {
     const free = Math.min(count, b.roadEdges!.length);
     return { ...b, cost: { ...b.cost, wood: (b.cost.wood ?? 0) - free, brick: (b.cost.brick ?? 0) - free } };
-  }), you.hand, planning.production, you.bankRatio, planning.remaining, planning.gap, planning.horizon)
-    .sort((a, b) => Number(!!b.protectsBonus && b.wait === 0) - Number(!!a.protectsBonus && a.wait === 0) || b.score - a.score);
+  }).filter(mayCommitRoads), you.hand, planning.production, you.bankRatio, planning.remaining, planning.gap, planning.horizon)
+    .sort((a, b) => Number(!!opts.funding && b.kind === opts.funding.kind && b.vertexId === opts.funding.vertexId) -
+      Number(!!opts.funding && a.kind === opts.funding.kind && a.vertexId === opts.funding.vertexId) || Number(!!b.protectsBonus && b.wait === 0) - Number(!!a.protectsBonus && a.wait === 0) || b.score - a.score);
 
   // Road Building placement: a played card owes the game free roads — it
   // blocks everything else until they're placed. Follow the advised expansion
   // path first; otherwise extend toward the best reachable corner.
   if ((opts.freeRoadsPending ?? 0) > 0 && board && gs && gs.youPlayer !== null) {
-    const advised = (freeRoadChoices(opts.freeRoadsPending!)[0]?.roadEdges ?? advice?.roadEdges ?? []).find(
+    const advised = (freeRoadChoices(opts.freeRoadsPending!)[0]?.roadEdges ?? []).find(
       (id) => !gs.state.roads.some((r) => r.edgeId === id),
     );
     const edgeId = advised ?? bestFreeRoadEdge(gs.state, gs.youPlayer);
@@ -771,6 +784,11 @@ export function decideNext(opts: {
   let top = funded ?? choices[0];
   let deliberateHold = "";
   const evaluation: NonNullable<AutopilotDecision["evaluation"]> = { horizon: planning.horizon.turns, gap: planning.gap,
+    roadCommitments: choices.filter(b => b.vertexId !== undefined && roadThreats.has(b.vertexId)).map(b => ({
+      vertexId: b.vertexId!, threats: roadThreats.get(b.vertexId!)!,
+      requiresFullFunding: !!roadThreats.get(b.vertexId!)?.length,
+      funded: affordableWithTrades(you.hand, you.bankRatio, b.cost), cost: b.cost,
+    })),
     alternatives: choices.slice(0, 8).map((b) => ({ kind: b.kind, score: b.score, wait: b.wait, vertexId: b.vertexId })) };
   const finish = (decision: AutopilotDecision): AutopilotDecision => {
     if (evaluation.spending?.selected === "save" && decision.kind !== "end-turn") {
@@ -800,7 +818,7 @@ export function decideNext(opts: {
       if (!allowed("build-road") || !hasPiece("road")) return null;
       const edge = board.edges[roads[0]];
       const coord = pixelsToColonistEdge(board.vertices[edge.a], board.vertices[edge.b]);
-      return coord ? { kind: "build-road", coord, describe: choice.protectsBonus ? "defend Longest Road against a late-game contender" : `road for funded ${choice.kind === "road" ? "Longest Road" : "settlement claim"}` } : null;
+      return coord ? { kind: "build-road", coord, funding: { kind: choice.kind, vertexId: choice.vertexId }, describe: choice.protectsBonus ? "defend Longest Road against a late-game contender" : `road for funded ${choice.kind === "road" ? "Longest Road" : "settlement claim"}` } : null;
     }
     if (choice.vertexId === undefined) return null;
     const v = board.vertices[choice.vertexId];
@@ -901,7 +919,7 @@ export function decideNext(opts: {
   if (opts.hasRoadBuilding && allowed("play-road-building") && hasPiece("road")) {
     const free = freeRoadChoices(Math.min(2, pieces?.roads ?? 2))[0];
     if (free && free.score > (top?.score ?? 0) && free.wait < planning.horizon.turns) {
-      return finish({ kind: "play-road-building", describe: `free roads accelerate the planned ${free.kind}` });
+      return finish({ kind: "play-road-building", funding: { kind: free.kind, vertexId: free.vertexId }, describe: `free roads accelerate the planned ${free.kind}` });
     }
   }
   // Compare spending against saving in the same score/card units. Re-run
@@ -923,7 +941,7 @@ export function decideNext(opts: {
       const hand = { ...you.hand };
       let conversion = 0;
       let partial = false;
-      if (!action && choice.roadEdges?.length && afford("road") &&
+      if (!action && mayCommitRoads(choice) && choice.roadEdges?.length && afford("road") &&
           allowed("build-road") && hasPiece("road") && gs && board) {
         const edge = board.edges[choice.roadEdges[0]];
         const coord = pixelsToColonistEdge(board.vertices[edge.a], board.vertices[edge.b]);
@@ -1020,10 +1038,9 @@ export function decideNext(opts: {
   if (top && !deliberateHold) {
     const action = build(top);
     if (action) return finish(action);
-    // Commit affordable road stages only when the complete investment fits
-    // inside the race. This preserves the chosen budget while avoiding a
-    // giant hand held until a multi-road settlement is fully funded.
-    if (top.roadEdges?.length && top.wait < planning.horizon.turns && afford("road") &&
+    // Safe routes may be built in stages. Contested claims need the whole
+    // budget now, before opponents get another turn to block the investment.
+    if (mayCommitRoads(top) && top.roadEdges?.length && top.wait < planning.horizon.turns && afford("road") &&
         allowed("build-road") && hasPiece("road") && gs && board) {
       const edge = board.edges[top.roadEdges[0]];
       const coord = pixelsToColonistEdge(board.vertices[edge.a], board.vertices[edge.b]);
