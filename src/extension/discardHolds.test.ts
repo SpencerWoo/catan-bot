@@ -10,6 +10,17 @@ import { planPosition } from "./planning";
 for (const [index, captured] of fornero.decisions.entries()) {
   it(`funds a useful purchase rather than the Fornero hold at decision ${captured.sourceDecision}`, () => {
     const replay = replayDecision(fornero as unknown as GameLog, index);
+    if (captured.sourceDecision === 87) {
+      // Wheat production cannot cover the city shortage before the race ends.
+      // Keep all three ore while reducing exposure through the required trade.
+      expect(replay.decision).toMatchObject({ kind: "bank-trade", trade: { get: "wheat" }, funding: { kind: "city", partial: true } });
+      const spending = replay.decision!.evaluation!.spending!;
+      const city = spending.alternatives.find(a => a.kind === "city")!;
+      expect(city.expectedLoss).toBeLessThan(spending.savedLoss);
+      expect(city.constructionDelay).toBe(0);
+      expect(city.score).toBeGreaterThan(spending.alternatives.find(a => a.kind === "dev")!.score);
+      return;
+    }
     expect(replay.decision).toMatchObject({ kind: "bank-trade", trade: { get: "wheat" }, funding: { kind: "dev" } });
     const spending = replay.decision!.evaluation!.spending!;
     const dev = spending.alternatives.find(a => a.kind === "dev")!;
@@ -43,7 +54,7 @@ for (const log of logs) for (const [index, captured] of log.decisions.entries())
   it(`replays the pre-discard hold in ${log.at} decision ${captured.sourceDecision}`, () => {
     const replay = replayDecision(log as unknown as GameLog, index);
     expect(replay.decision).not.toBeNull();
-    // Two alternatives require costly conversions or lack a legal purchase;
+    // One alternative still requires costly conversions or lacks a legal purchase;
     // a historical discard is not by itself proof that saving was wrong.
     const expected = new Map([[60, "end-turn"], [51, "end-turn"], [100, "buy-dev"],
       [18, "build-road"], [52, "bank-trade"], [79, "bank-trade"]]);

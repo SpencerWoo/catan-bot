@@ -176,7 +176,8 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
       const points = Math.min(Math.max(0, gap), option.vp);
       const wins = option.kind !== "dev" && points >= gap && gap > 0;
       const discount = Number.isFinite(wait) ? Math.exp(-wait / (1 + horizon.turns)) / (1 + wait) : 0;
-      const score = (points + (option.protectsBonus ? 2 : 0) + productionValue / 4) * discount + (wins && wait === 0 ? 100 : 0);
+      const valuedPoints = wins ? points : Math.max(0, points - (option.deferredVp ?? 0));
+      const score = (valuedPoints + (option.protectsBonus ? 2 : 0) + (option.disruptionValue ?? 0) + productionValue / 4) * discount + (wins && wait === 0 ? 100 : 0);
       return { ...option, wait, score, productionValue };
     }).sort((a, b) => b.score - a.score || a.wait - b.wait || a.kind.localeCompare(b.kind));
   }
@@ -2465,6 +2466,46 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
     }
     return threatenedLength > me.longestRoadLen ? roadBonusPath(state, me.playerId, threatenedLength, me.roadsLeft) : null;
   }
+  function roadAwardSwing(state, players) {
+    var _a;
+    const lengths = players.map((p) => ({ p, length: longestRoad(state, p.playerId) }));
+    const best = Math.max(5, ...lengths.map((x) => x.length));
+    const leaders = lengths.filter((x) => x.length === best);
+    const holder = players.find((p) => p.holdsLongestRoad);
+    const winner = ((_a = leaders.find((x) => x.p === holder)) == null ? void 0 : _a.p) ?? (leaders.length === 1 ? leaders[0].p : void 0);
+    return {
+      gained: (winner == null ? void 0 : winner.isYou) && !(holder == null ? void 0 : holder.isYou) ? 2 : 0,
+      denied: holder && !holder.isYou && winner !== holder ? 2 : 0
+    };
+  }
+  function settlementDisruption(state, trial, vertexId, players, horizon) {
+    let denied = 0;
+    for (const p of players) {
+      if (p.isYou || p.playerId === void 0 || (p.settlementsLeft ?? 0) <= 0) continue;
+      const before = p.settlementRoutes ?? settlementRoutes(state, p.playerId);
+      if (!before.some((r) => r.edges.length === 0 && (r.vertexId === vertexId || state.board.vertices[vertexId].adjacent.includes(r.vertexId)))) continue;
+      const production = Object.fromEntries(RESOURCES.map((r) => [r, p.production[r] * (p.rollsPerTurn ?? players.length)]));
+      const value = (routes) => {
+        var _a;
+        return ((_a = evaluateBuilds(
+          routes.filter((r) => r.edges.length <= (p.roadsLeft ?? 0)).map((r) => ({
+            kind: "settlement",
+            vp: 1,
+            cost: { ...BUILD.settlement, wood: 1 + r.edges.length, brick: 1 + r.edges.length },
+            production: vertexIncome(state, r.vertexId, p.rollsPerTurn ?? players.length)
+          })),
+          p.handKnown === false ? zeroHand() : p.hand,
+          production,
+          p.bankRatios ?? {},
+          BUILD.settlement,
+          2,
+          horizon
+        )[0]) == null ? void 0 : _a.score) ?? 0;
+      };
+      denied = Math.max(denied, value(before) - value(settlementRoutes(trial, p.playerId)));
+    }
+    return Math.max(0, denied) / Math.max(1, players.length - 1);
+  }
   function planPosition(tracker2, youName, gs, opts = {}) {
     var _a, _b;
     const target = opts.target ?? 10;
@@ -2530,6 +2571,7 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
     const production = Object.fromEntries(RESOURCES.map((r) => [r, me.production[r] * rolls]));
     const gap = Math.max(0, target - me.publicVp - (me.hiddenVp ?? 0));
     const options = [];
+    const roadReason = bonusTiming(inputs, victories, target, "longest-road");
     if (gs && gs.youPlayer !== null) {
       if ((me.citiesLeft ?? 0) > 0) {
         for (const b of gs.state.buildings) if (b.player === gs.youPlayer && b.kind === "settlement") {
@@ -2543,9 +2585,17 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
         if (port) {
           for (const r of RESOURCES) if (port.kind === "any" || port.kind === r) ratios[r] = Math.min(ratios[r] ?? 4, port.ratio);
         }
+        const trial = {
+          ...gs.state,
+          roads: [...gs.state.roads, ...route.edges.map((edgeId) => ({ edgeId, player: gs.youPlayer }))],
+          buildings: [...gs.state.buildings, { vertexId: route.vertexId, player: gs.youPlayer, kind: "settlement" }]
+        };
+        const swing = roadAwardSwing(trial, inputs);
         options.push({
           kind: "settlement",
-          vp: 1,
+          vp: 1 + swing.gained,
+          deferredVp: roadReason ? 0 : swing.gained,
+          disruptionValue: ((roadReason == null ? void 0 : roadReason.startsWith("deny")) ? swing.denied / Math.max(1, inputs.length - 1) : 0) + settlementDisruption(gs.state, trial, route.vertexId, inputs, horizon),
           cost: { wood: 1 + route.edges.length, brick: 1 + route.edges.length, wheat: 1, sheep: 1 },
           production: vertexIncome(gs.state, route.vertexId, rolls),
           vertexId: route.vertexId,
@@ -2562,10 +2612,10 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
         production: zeroHand(),
         roadEdges: defense
       });
-      const roadReason = bonusTiming(inputs, victories, target, "longest-road");
       if (((_a = me.longestRoadPath) == null ? void 0 : _a.length) && roadReason) options.push({
         kind: "road",
         vp: 2,
+        disruptionValue: roadReason.startsWith("deny") ? 2 / Math.max(1, inputs.length - 1) : 0,
         deniesWin: roadReason.startsWith("deny"),
         cost: { wood: me.longestRoadPath.length, brick: me.longestRoadPath.length },
         production: zeroHand(),
@@ -3298,7 +3348,7 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
     return best;
   }
   function decideNext(opts) {
-    var _a, _b, _c, _d, _e, _f, _g, _h, _i, _j, _k, _l, _m, _n;
+    var _a, _b, _c, _d, _e, _f, _g, _h, _i, _j, _k, _l, _m, _n, _o, _p, _q;
     const { tracker: tracker2, youName, fit, gs, advice, rolledThisTurn, robberPending, robberHex, discardPending } = opts;
     const you = tracker2.players.get(youName);
     if (!you) return null;
@@ -3445,10 +3495,10 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
       }
       return { ...decision, evaluation };
     };
-    const build = (choice) => {
+    const build = (choice, hand = you.hand) => {
       var _a2;
-      if (!affordableWithTrades(you.hand, you.bankRatio, choice.cost)) return null;
-      const trade = tradeTowardCost(you.hand, you.bankRatio, choice.cost, planning.weights);
+      if (!affordableWithTrades(hand, you.bankRatio, choice.cost)) return null;
+      const trade = tradeTowardCost(hand, you.bankRatio, choice.cost, planning.weights);
       if (trade && allowed("bank-trade")) return {
         kind: "bank-trade",
         trade,
@@ -3548,19 +3598,62 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
     if (knightReason == null ? void 0 : knightReason.startsWith("defend")) return finish({ kind: "play-knight", describe: `play a knight — ${knightReason}` });
     if (monopolyAction) return finish(monopolyAction);
     if (knightReason) return finish({ kind: "play-knight", describe: `play a knight — ${knightReason}` });
-    if (top && opts.hasYearOfPlenty && allowed("play-year-of-plenty")) {
+    if (opts.hasYearOfPlenty && allowed("play-year-of-plenty") && (!funded || ((_g = opts.funding) == null ? void 0 : _g.partial))) {
+      const baseline = ((_h = evaluateBuilds(
+        choices,
+        you.hand,
+        planning.production,
+        you.bankRatio,
+        planning.remaining,
+        planning.gap,
+        planning.horizon
+      )[0]) == null ? void 0 : _h.score) ?? 0;
       let best = null;
       for (const a of RESOURCES) for (const b of RESOURCES) {
         const hand = { ...you.hand };
         hand[a]++;
         hand[b]++;
-        const after = evaluateBuilds([top], hand, planning.production, you.bankRatio, planning.remaining, planning.gap, planning.horizon)[0];
-        if (after.wait < top.wait && (!best || after.score - top.score > best.improvement)) best = { resources: [a, b], improvement: after.score - top.score };
+        for (const after of evaluateBuilds(
+          choices.filter((c) => c.kind !== "dev"),
+          hand,
+          planning.production,
+          you.bankRatio,
+          planning.remaining,
+          planning.gap,
+          planning.horizon
+        )) {
+          if (after.wait !== 0 || after.score <= baseline || affordableWithTrades(you.hand, you.bankRatio, after.cost) || (((_i = after.roadEdges) == null ? void 0 : _i.length) ?? 0) > ((pieces == null ? void 0 : pieces.roads) ?? 15) || !build(after, hand)) continue;
+          const budget = { ...hand };
+          let trade = tradeTowardCost(budget, you.bankRatio, after.cost, planning.weights);
+          let conversion = 0;
+          while (trade) {
+            budget[trade.give] -= trade.giveCount;
+            budget[trade.get]++;
+            conversion += trade.giveCount - 1;
+            trade = tradeTowardCost(budget, you.bankRatio, after.cost, planning.weights);
+          }
+          const fundedHand = { ...you.hand };
+          for (const r of RESOURCES) fundedHand[r] = Math.max(fundedHand[r], after.cost[r] ?? 0);
+          after.score = evaluateBuilds(
+            [after],
+            fundedHand,
+            planning.production,
+            you.bankRatio,
+            planning.remaining,
+            planning.gap,
+            planning.horizon
+          )[0].score - conversion / 4;
+          if (after.score <= baseline) continue;
+          const surplus = -RESOURCES.reduce((n, r) => n + Math.max(0, budget[r] - (after.cost[r] ?? 0)) * (1 + Math.max(0, (planning.remaining[r] ?? 0) - you.hand[r]) / (1 + planning.production[r] * planning.horizon.turns)), 0);
+          if (!best || after.score > best.choice.score + 1e-9 || Math.abs(after.score - best.choice.score) <= 1e-9 && surplus < best.surplus)
+            best = { resources: [a, b], choice: after, surplus };
+        }
       }
-      if (best && best.improvement > 0) return finish({
+      if (best) return finish({
         kind: "play-year-of-plenty",
         resources: best.resources,
-        describe: `year of plenty — ${best.resources.join(" + ")} accelerates ${top.kind}`
+        funding: { kind: best.choice.kind, vertexId: best.choice.vertexId },
+        describe: `year of plenty — ${best.resources.join(" + ")} completes ${best.choice.kind} this turn`
       });
     }
     if (opts.hasRoadBuilding && allowed("play-road-building") && hasPiece("road")) {
@@ -3572,9 +3665,9 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
     const income = discardIncome(tracker2, gs, opts.robberHex);
     const savingRolls = Math.max(2, tracker2.players.size);
     const loss = (hand) => expectedDiscardLoss(tracker2, hand, limit, savingRolls, income);
-    if (top && loss(you.hand) > 0 && (!funded || ((_g = opts.funding) == null ? void 0 : _g.partial))) {
+    if (top && loss(you.hand) > 0 && (!funded || ((_j = opts.funding) == null ? void 0 : _j.partial))) {
       const raw = evaluateBuilds(
-        ((_h = opts.funding) == null ? void 0 : _h.partial) && funded ? [funded] : choices,
+        ((_k = opts.funding) == null ? void 0 : _k.partial) && funded ? [funded] : choices,
         you.hand,
         planning.production,
         you.bankRatio,
@@ -3592,8 +3685,9 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
         let action = build(choice);
         const hand = { ...you.hand };
         let conversion = 0;
+        let requiredConversion = 0;
         let partial = false;
-        if (!action && mayCommitRoads(choice) && ((_i = choice.roadEdges) == null ? void 0 : _i.length) && afford("road") && allowed("build-road") && hasPiece("road") && gs && board) {
+        if (!action && mayCommitRoads(choice) && ((_l = choice.roadEdges) == null ? void 0 : _l.length) && afford("road") && allowed("build-road") && hasPiece("road") && gs && board) {
           const edge = board.edges[choice.roadEdges[0]];
           const coord = pixelsToColonistEdge(board.vertices[edge.a], board.vertices[edge.b]);
           if (coord) action = {
@@ -3603,7 +3697,7 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
           };
         }
         if (action) {
-          if ((_j = choice.roadEdges) == null ? void 0 : _j.length) {
+          if ((_m = choice.roadEdges) == null ? void 0 : _m.length) {
             if (action.trade) {
               hand[action.trade.give] -= action.trade.giveCount;
               hand[action.trade.get]++;
@@ -3625,9 +3719,14 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
         } else if (allowed("bank-trade")) {
           const trade = tradeTowardCost(hand, you.bankRatio, choice.cost, planning.weights);
           if (!trade) continue;
-          hand[trade.give] -= trade.giveCount;
-          hand[trade.get]++;
-          conversion = trade.giveCount - 1;
+          let nextTrade = trade;
+          while (nextTrade) {
+            hand[nextTrade.give] -= nextTrade.giveCount;
+            hand[nextTrade.get]++;
+            conversion += nextTrade.giveCount - 1;
+            if (hand[nextTrade.get] - 1 + planning.production[nextTrade.get] * planning.horizon.turns < (choice.cost[nextTrade.get] ?? 0)) requiredConversion += nextTrade.giveCount - 1;
+            nextTrade = tradeTowardCost(hand, you.bankRatio, choice.cost, planning.weights);
+          }
           partial = true;
           action = {
             kind: "bank-trade",
@@ -3637,10 +3736,10 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
           };
         }
         if (!action) continue;
-        const stagedRoad = action.kind === "build-road" && !!((_k = choice.roadEdges) == null ? void 0 : _k.length);
+        const stagedRoad = action.kind === "build-road" && !!((_n = choice.roadEdges) == null ? void 0 : _n.length);
         const competing = partial || choice === save ? save : raw.find((b) => b !== choice);
         const competingCost = { ...competing == null ? void 0 : competing.cost };
-        if (stagedRoad && ((_l = competing == null ? void 0 : competing.roadEdges) == null ? void 0 : _l.includes(choice.roadEdges[0]))) {
+        if (stagedRoad && ((_o = competing == null ? void 0 : competing.roadEdges) == null ? void 0 : _o.includes(choice.roadEdges[0]))) {
           competingCost.wood = (competingCost.wood ?? 0) - 1;
           competingCost.brick = (competingCost.brick ?? 0) - 1;
         }
@@ -3663,14 +3762,23 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
           constructionDelay = Number.isFinite(after.wait) ? Math.max(0, after.wait - save.wait) : null;
         }
         let nextIncome = income;
-        if (!partial && !((_m = choice.roadEdges) == null ? void 0 : _m.length) && gs && gs.youPlayer !== null && choice.vertexId !== void 0 && (choice.kind === "city" || choice.kind === "settlement")) {
+        if (!partial && !((_p = choice.roadEdges) == null ? void 0 : _p.length) && gs && gs.youPlayer !== null && choice.vertexId !== void 0 && (choice.kind === "city" || choice.kind === "settlement")) {
           const buildings = choice.kind === "city" ? gs.state.buildings.map((b) => b.vertexId === choice.vertexId ? { ...b, kind: "city" } : b) : [...gs.state.buildings, { vertexId: choice.vertexId, player: gs.youPlayer, kind: "settlement" }];
           nextIncome = discardIncome(tracker2, { ...gs, state: { ...gs.state, buildings } }, opts.robberHex);
         }
         const expectedLoss = expectedDiscardLoss(tracker2, hand, limit, savingRolls, nextIncome);
         const budgetLoss = followsTarget ? Math.max(0, save.score - continuationValue) : 0;
-        const conversionCost = Math.max(0, conversion / 4 - budgetLoss);
-        const value = (partial ? save.score : choice.score) + continuationValue - expectedLoss / 4 - conversionCost - (followsTarget ? 0 : delay);
+        const conversionCost = partial ? (conversion - requiredConversion) / 4 : Math.max(0, conversion / 4 - budgetLoss);
+        const reserveValue = partial ? evaluateBuilds(
+          [choice],
+          hand,
+          planning.production,
+          you.bankRatio,
+          planning.remaining,
+          planning.gap,
+          planning.horizon
+        )[0].score : choice.score;
+        const value = reserveValue + continuationValue - expectedLoss / 4 - conversionCost - (followsTarget ? 0 : delay);
         evaluation.spending.alternatives.push({
           kind: choice.kind,
           vertexId: choice.vertexId,
@@ -3700,7 +3808,7 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
     if (top && !deliberateHold) {
       const action = build(top);
       if (action) return finish(action);
-      if (mayCommitRoads(top) && ((_n = top.roadEdges) == null ? void 0 : _n.length) && top.wait < planning.horizon.turns && afford("road") && allowed("build-road") && hasPiece("road") && gs && board) {
+      if (mayCommitRoads(top) && ((_q = top.roadEdges) == null ? void 0 : _q.length) && top.wait < planning.horizon.turns && afford("road") && allowed("build-road") && hasPiece("road") && gs && board) {
         const edge = board.edges[top.roadEdges[0]];
         const coord = pixelsToColonistEdge(board.vertices[edge.a], board.vertices[edge.b]);
         if (coord) return finish({
@@ -4077,7 +4185,7 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
       byPlayers
     };
   }
-  const VERSION = "v1.29 discard-spending";
+  const VERSION = "v1.31 victory-timing";
   const CSS = `
 #catan-copilot {
   --surface: #fcfcfb; --ink: #0b0b0b; --ink-2: #52514e; --ink-3: #898781;

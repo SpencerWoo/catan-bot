@@ -52,6 +52,10 @@ export interface BuildOption {
   deniesWin?: boolean;
   /** Preserve an owned bonus; never count this as two newly earned VP. */
   protectsBonus?: boolean;
+  /** Verified opponent progress removed by this build, separate from our VP. */
+  disruptionValue?: number;
+  /** Reversible bonus VP not yet needed by the winning plan. Still count a win. */
+  deferredVp?: number;
 }
 export interface BuildEvaluation extends BuildOption {
   wait: number;
@@ -83,7 +87,8 @@ export function evaluateBuilds(options: BuildOption[], hand: Hand, production: H
     const wins = option.kind !== "dev" && points >= gap && gap > 0;
     const discount = Number.isFinite(wait) ? Math.exp(-wait / (1 + horizon.turns)) / (1 + wait) : 0;
     // Four useful cards are roughly one build's worth of future progress.
-    const score = (points + (option.protectsBonus ? 2 : 0) + productionValue / 4) * discount + (wins && wait === 0 ? 100 : 0);
+    const valuedPoints = wins ? points : Math.max(0, points - (option.deferredVp ?? 0));
+    const score = (valuedPoints + (option.protectsBonus ? 2 : 0) + (option.disruptionValue ?? 0) + productionValue / 4) * discount + (wins && wait === 0 ? 100 : 0);
     return { ...option, wait, score, productionValue };
   }).sort((a, b) => b.score - a.score || a.wait - b.wait || a.kind.localeCompare(b.kind));
 }

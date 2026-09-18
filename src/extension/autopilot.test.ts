@@ -953,7 +953,7 @@ describe("autopilot decisions", () => {
     expect(d?.describe).toContain("city");
   });
 
-  it("in the endgame plays Year of Plenty toward the cheapest VP build even if it can't finish it", () => {
+  it("holds Year of Plenty in the endgame when it cannot finish a build", () => {
     const t = trackerWith({ ore: 1 }, false); // city is 4 cards away
     t.players.get("Nick")!.serverVp = 8; // 10-point game, within 3 of the target
     const fits = rankLiveStrategies(t, "Nick");
@@ -961,8 +961,7 @@ describe("autopilot decisions", () => {
       tracker: t, youName: "Nick", fit: fits[0], gs: gsWithSettlement(), advice: null,
       rolledThisTurn: true, hasYearOfPlenty: true,
     });
-    expect(d?.kind).toBe("play-year-of-plenty");
-    expect(d?.resources?.every((r) => r === "ore" || r === "wheat")).toBe(true);
+    expect(d?.kind).toBe("end-turn");
   });
 
   it("stages a selected expansion without a road-count cutoff", () => {
@@ -993,14 +992,14 @@ describe("autopilot decisions", () => {
     expect(d?.describe).toContain("planned");
   });
 
-  it("uses Year of Plenty when it accelerates the best investment", () => {
+  it("holds Year of Plenty with an empty hand", () => {
     const t = trackerWith({}, false); // empty hand: everything is 4+ cards away
     const fits = rankLiveStrategies(t, "Nick");
     const d = decideNext({
       tracker: t, youName: "Nick", fit: fits[0], gs: gsWithSettlement(), advice: null,
       rolledThisTurn: true, hasYearOfPlenty: true,
     });
-    expect(d?.kind).toBe("play-year-of-plenty");
+    expect(d?.kind).toBe("end-turn");
   });
 
     it("does NOT feed roads into a race the opponent reaches first", async () => {

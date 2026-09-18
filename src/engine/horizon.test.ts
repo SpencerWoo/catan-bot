@@ -65,3 +65,15 @@ describe("remaining game horizon", () => {
   });
 
 });
+
+it("does not inflate productive expansion with a temporary early road award", () => {
+  const settlement: BuildOption = { kind: "settlement", cost: {}, vp: 1, production: empty() };
+  const earlyAward = { ...settlement, vp: 3, deferredVp: 2 };
+  const evaluated = evaluateBuilds([settlement, earlyAward], empty(), empty(), {}, {}, 11, { turns: 15, urgency: 1 / 16 });
+  expect(evaluated[0].score).toBe(evaluated[1].score);
+});
+it("counts incidental road points when the construction completes the victory target", () => {
+  const award: BuildOption = { kind: "settlement", cost: {}, vp: 3, deferredVp: 2, production: empty() };
+  const [finish] = evaluateBuilds([award], empty(), empty(), {}, {}, 3, { turns: 2, urgency: 1 / 3 });
+  expect(finish.score).toBe(103);
+});

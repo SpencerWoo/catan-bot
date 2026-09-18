@@ -804,9 +804,9 @@ export function decideNext(opts: {
     }
     return { ...decision, evaluation };
   };
-  const build = (choice: BuildEvaluation): AutopilotDecision | null => {
-    if (!affordableWithTrades(you.hand, you.bankRatio, choice.cost)) return null;
-    const trade = tradeTowardCost(you.hand, you.bankRatio, choice.cost, planning.weights);
+  const build = (choice: BuildEvaluation, hand = you.hand): AutopilotDecision | null => {
+    if (!affordableWithTrades(hand, you.bankRatio, choice.cost)) return null;
+    const trade = tradeTowardCost(hand, you.bankRatio, choice.cost, planning.weights);
     if (trade && allowed("bank-trade")) return { kind: "bank-trade", trade, funding: { kind: choice.kind, vertexId: choice.vertexId },
       describe: `bank-trade ${trade.giveCount} ${trade.give} for ${trade.get} to fund ${choice.kind}` };
     if (trade) return null;
@@ -906,15 +906,47 @@ export function decideNext(opts: {
   if (monopolyAction) return finish(monopolyAction);
   if (knightReason) return finish({ kind: "play-knight", describe: `play a knight — ${knightReason}` });
 
-  if (top && opts.hasYearOfPlenty && allowed("play-year-of-plenty")) {
-    let best: { resources: [Resource, Resource]; improvement: number } | null = null;
+  if (opts.hasYearOfPlenty && allowed("play-year-of-plenty") && (!funded || opts.funding?.partial)) {
+    // Preserve the card's optionality until it completes a productive purchase.
+    // Buying another lottery ticket is not a reason to cash this one in.
+    const baseline = evaluateBuilds(choices, you.hand, planning.production, you.bankRatio,
+      planning.remaining, planning.gap, planning.horizon)[0]?.score ?? 0;
+    let best: { resources: [Resource, Resource]; choice: BuildEvaluation; surplus: number } | null = null;
     for (const a of RESOURCES) for (const b of RESOURCES) {
       const hand = { ...you.hand }; hand[a]++; hand[b]++;
-      const after = evaluateBuilds([top], hand, planning.production, you.bankRatio, planning.remaining, planning.gap, planning.horizon)[0];
-      if (after.wait < top.wait && (!best || after.score - top.score > best.improvement)) best = { resources: [a, b], improvement: after.score - top.score };
+      for (const after of evaluateBuilds(choices.filter(c => c.kind !== "dev"), hand,
+        planning.production, you.bankRatio, planning.remaining, planning.gap, planning.horizon)) {
+        if (after.wait !== 0 || after.score <= baseline ||
+            affordableWithTrades(you.hand, you.bankRatio, after.cost) ||
+            (after.roadEdges?.length ?? 0) > (pieces?.roads ?? 15) || !build(after, hand)) continue;
+        // Equal funding outcomes prefer taking missing resources directly,
+        // rather than choosing wood just because it appears first in the enum.
+        const budget = { ...hand };
+        let trade = tradeTowardCost(budget, you.bankRatio, after.cost, planning.weights);
+        let conversion = 0;
+        while (trade) {
+          budget[trade.give] -= trade.giveCount; budget[trade.get]++;
+          conversion += trade.giveCount - 1;
+          trade = tradeTowardCost(budget, you.bankRatio, after.cost, planning.weights);
+        }
+        // Compare resource selections with the SAME production valuation;
+        // spending more cards must not inflate their scarcity and score.
+        const fundedHand = { ...you.hand };
+        for (const r of RESOURCES) fundedHand[r] = Math.max(fundedHand[r], after.cost[r] ?? 0);
+        after.score = evaluateBuilds([after], fundedHand, planning.production,
+          you.bankRatio, planning.remaining, planning.gap, planning.horizon)[0].score - conversion / 4;
+        if (after.score <= baseline) continue;
+        const surplus = -RESOURCES.reduce((n, r) => n + Math.max(0, budget[r] - (after.cost[r] ?? 0)) *
+          (1 + Math.max(0, (planning.remaining[r] ?? 0) - you.hand[r]) /
+            (1 + planning.production[r] * planning.horizon.turns)), 0);
+        if (!best || after.score > best.choice.score + 1e-9 ||
+            (Math.abs(after.score - best.choice.score) <= 1e-9 && surplus < best.surplus))
+          best = { resources: [a, b], choice: after, surplus };
+      }
     }
-    if (best && best.improvement > 0) return finish({ kind: "play-year-of-plenty", resources: best.resources,
-      describe: `year of plenty — ${best.resources.join(" + ")} accelerates ${top.kind}` });
+    if (best) return finish({ kind: "play-year-of-plenty", resources: best.resources,
+      funding: { kind: best.choice.kind, vertexId: best.choice.vertexId },
+      describe: `year of plenty — ${best.resources.join(" + ")} completes ${best.choice.kind} this turn` });
   }
   if (opts.hasRoadBuilding && allowed("play-road-building") && hasPiece("road")) {
     const free = freeRoadChoices(Math.min(2, pieces?.roads ?? 2))[0];
@@ -940,6 +972,7 @@ export function decideNext(opts: {
       let action = build(choice);
       const hand = { ...you.hand };
       let conversion = 0;
+      let requiredConversion = 0;
       let partial = false;
       if (!action && mayCommitRoads(choice) && choice.roadEdges?.length && afford("road") &&
           allowed("build-road") && hasPiece("road") && gs && board) {
@@ -971,8 +1004,17 @@ export function decideNext(opts: {
       } else if (allowed("bank-trade")) {
         const trade = tradeTowardCost(hand, you.bankRatio, choice.cost, planning.weights);
         if (!trade) continue;
-        hand[trade.give] -= trade.giveCount; hand[trade.get]++;
-        conversion = trade.giveCount - 1;
+        let nextTrade: typeof trade | null = trade;
+        while (nextTrade) {
+          hand[nextTrade.give] -= nextTrade.giveCount; hand[nextTrade.get]++;
+          conversion += nextTrade.giveCount - 1;
+          // Income cannot fill this shortage within the remaining game, so
+          // the target already depends on this conversion. Do not penalize
+          // making it now a second time. Optional acceleration still pays.
+          if (hand[nextTrade.get] - 1 + planning.production[nextTrade.get] * planning.horizon.turns <
+              (choice.cost[nextTrade.get] ?? 0)) requiredConversion += nextTrade.giveCount - 1;
+          nextTrade = tradeTowardCost(hand, you.bankRatio, choice.cost, planning.weights);
+        }
         partial = true;
         action = { kind: "bank-trade", trade,
           funding: { kind: choice.kind, vertexId: choice.vertexId, partial: true },
@@ -1019,8 +1061,13 @@ export function decideNext(opts: {
       // reflected in the lost continuation value. Use the larger cost signal,
       // rather than adding both penalties for the same depleted build budget.
       const budgetLoss = followsTarget ? Math.max(0, save.score - continuationValue) : 0;
-      const conversionCost = Math.max(0, conversion / 4 - budgetLoss);
-      const value = (partial ? save.score : choice.score) + continuationValue - expectedLoss / 4
+      const conversionCost = partial ? (conversion - requiredConversion) / 4 : Math.max(0, conversion / 4 - budgetLoss);
+      // The target's affordability already includes whole-card conversions.
+      // A reserve trade retains that target; evaluate the entire legal sequence
+      // and its resulting budget, just as for a fully funded purchase.
+      const reserveValue = partial ? evaluateBuilds([choice], hand, planning.production, you.bankRatio,
+        planning.remaining, planning.gap, planning.horizon)[0].score : choice.score;
+      const value = reserveValue + continuationValue - expectedLoss / 4
         - conversionCost - (followsTarget ? 0 : delay);
       evaluation.spending.alternatives.push({ kind: choice.kind, vertexId: choice.vertexId,
         remainingCards: RESOURCES.reduce((n, r) => n + hand[r], 0), expectedLoss,

@@ -149,6 +149,40 @@ export function roadDefensePath(state: GameState, players: PlayerVictoryInput[],
     ? roadBonusPath(state, me.playerId as PlayerId, threatenedLength, me.roadsLeft) : null;
 }
 
+/** Award ties retain the current holder; a cut can leave the award unowned.
+ * Only the completed legal build is credited, never a road-count estimate. */
+function roadAwardSwing(state: GameState, players: PlayerVictoryInput[]) {
+  const lengths = players.map(p => ({ p, length: longestRoad(state, p.playerId as PlayerId) }));
+  const best = Math.max(5, ...lengths.map(x => x.length));
+  const leaders = lengths.filter(x => x.length === best);
+  const holder = players.find(p => p.holdsLongestRoad);
+  const winner = leaders.find(x => x.p === holder)?.p ?? (leaders.length === 1 ? leaders[0].p : undefined);
+  return { gained: winner?.isYou && !holder?.isYou ? 2 : 0,
+    denied: holder && !holder.isYou && winner !== holder ? 2 : 0 };
+}
+
+/** Price the loss of a connected settlement opportunity against the opponent's
+ * next best legal alternative. Do not count every adjacent site as a lost VP. */
+function settlementDisruption(state: GameState, trial: GameState, vertexId: number,
+  players: PlayerVictoryInput[], horizon: Horizon): number {
+  let denied = 0;
+  for (const p of players) {
+    if (p.isYou || p.playerId === undefined || (p.settlementsLeft ?? 0) <= 0) continue;
+    const before = p.settlementRoutes ?? settlementRoutes(state, p.playerId as PlayerId);
+    if (!before.some(r => r.edges.length === 0 &&
+      (r.vertexId === vertexId || state.board.vertices[vertexId].adjacent.includes(r.vertexId)))) continue;
+    const production = Object.fromEntries(RESOURCES.map(r => [r, p.production[r] * (p.rollsPerTurn ?? players.length)])) as Hand;
+    const value = (routes: typeof before) => evaluateBuilds(routes.filter(r => r.edges.length <= (p.roadsLeft ?? 0))
+      .map(r => ({ kind: "settlement" as const, vp: 1,
+        cost: { ...BUILD.settlement, wood: 1 + r.edges.length, brick: 1 + r.edges.length },
+        production: vertexIncome(state, r.vertexId, p.rollsPerTurn ?? players.length) })),
+      p.handKnown === false ? zeroHand() : p.hand, production, p.bankRatios ?? {}, BUILD.settlement, 2, horizon)[0]?.score ?? 0;
+    // gap > 1 avoids treating an isolated denied settlement as an actual win.
+    denied = Math.max(denied, value(before) - value(settlementRoutes(trial, p.playerId as PlayerId)));
+  }
+  return Math.max(0, denied) / Math.max(1, players.length - 1);
+}
+
 export function planPosition(tracker: TrackerState, youName: string,
   gs: { state: GameState; youPlayer: PlayerId | null } | null, opts: PlanningOptions = {}): PlanningContext {
   const target = opts.target ?? 10;
@@ -206,6 +240,7 @@ export function planPosition(tracker: TrackerState, youName: string,
   const production = Object.fromEntries(RESOURCES.map((r) => [r, me.production[r] * rolls])) as Hand;
   const gap = Math.max(0, target - me.publicVp - (me.hiddenVp ?? 0));
   const options: BuildOption[] = [];
+  const roadReason = bonusTiming(inputs, victories, target, "longest-road");
   if (gs && gs.youPlayer !== null) {
     if ((me.citiesLeft ?? 0) > 0) for (const b of gs.state.buildings) if (b.player === gs.youPlayer && b.kind === "settlement") {
       options.push({ kind: "city", vp: 1, cost: BUILD.city, production: vertexIncome(gs.state, b.vertexId, rolls), vertexId: b.vertexId });
@@ -215,15 +250,25 @@ export function planPosition(tracker: TrackerState, youName: string,
       const ratios = { ...you.bankRatio };
       const port = gs.state.board.vertices[route.vertexId].port;
       if (port) for (const r of RESOURCES) if (port.kind === "any" || port.kind === r) ratios[r] = Math.min(ratios[r] ?? 4, port.ratio);
-      options.push({ kind: "settlement", vp: 1,
+      const trial: GameState = { ...gs.state,
+        roads: [...gs.state.roads, ...route.edges.map(edgeId => ({ edgeId, player: gs.youPlayer! }))],
+        buildings: [...gs.state.buildings, { vertexId: route.vertexId, player: gs.youPlayer, kind: "settlement" }] };
+      const swing = roadAwardSwing(trial, inputs);
+      options.push({ kind: "settlement", vp: 1 + swing.gained,
+        deferredVp: roadReason ? 0 : swing.gained,
+        disruptionValue: (roadReason?.startsWith("deny") ? swing.denied / Math.max(1, inputs.length - 1) : 0) +
+          settlementDisruption(gs.state, trial, route.vertexId, inputs, horizon),
         cost: { wood: 1 + route.edges.length, brick: 1 + route.edges.length, wheat: 1, sheep: 1 },
         production: vertexIncome(gs.state, route.vertexId, rolls), vertexId: route.vertexId, roadEdges: route.edges, ratios });
     }
     const defense = roadDefensePath(gs.state, inputs, target);
     if (defense?.length) options.push({ kind: "road", vp: 0, protectsBonus: true,
       cost: { wood: defense.length, brick: defense.length }, production: zeroHand(), roadEdges: defense });
-    const roadReason = bonusTiming(inputs, victories, target, "longest-road");
+    // A reversible bonus transfer is not a permanent four-point gain.
+    // Invest when needed for our finish or to stop theirs, not just because
+    // an opponent currently holds the award.
     if (me.longestRoadPath?.length && roadReason) options.push({ kind: "road", vp: 2,
+      disruptionValue: roadReason.startsWith("deny") ? 2 / Math.max(1, inputs.length - 1) : 0,
       deniesWin: roadReason.startsWith("deny"),
       cost: { wood: me.longestRoadPath.length, brick: me.longestRoadPath.length }, production: zeroHand(), roadEdges: me.longestRoadPath });
   }
