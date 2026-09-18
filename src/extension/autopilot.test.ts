@@ -1444,7 +1444,24 @@ describe("autopilot decisions", () => {
 
 
 
-  it("executor plays a learned knight once per turn and not the turn it's bought", () => {
+  it.each([{ myDevCardIds: [] }, { myDevCardIds: [12, 12] }])("executor respects a wire hand without knights ($myDevCardIds) despite DOM knight imagery", ({ myDevCardIds }) => {
+    const sent: Array<{ kind: string }> = [];
+    const ap = new Autopilot(new ProtocolLearner(), (d) => {
+      sent.push(d);
+      return true;
+    });
+    ap.setEnabled(true);
+    ap.onTurnState(3, 3);
+    ap.onYouRolled();
+    const tracker = trackerWith({ ore: 3, wheat: 2 });
+    const gs = gsWithSettlement();
+    const hex = board.hexes[board.vertices[gs.state.buildings[0].vertexId].hexIds[0]];
+    ap.tick({ tracker, gs, advice: null, fit: rankLiveStrategies(tracker, "Nick")[0],
+      myDevCardIds, knightsInHand: 1, robberHex: { x: hex.q, y: hex.r }, now: 10_000 });
+    expect(sent.map(d => d.kind)).toEqual(["build-city"]);
+  });
+
+  it.each(["wire", "dom"])("executor plays a learned knight once per turn and not the turn it's bought (%s)", (source) => {
     localStorage.clear();
     const learner = new ProtocolLearner();
     learner.recordOutbound({ id: 9, data: { type: 60, payload: { cardType: 7 } } }, 1000);
@@ -1470,6 +1487,7 @@ describe("autopilot decisions", () => {
       advice: null,
       fit: cityDev,
       knightsInHand: 2,
+      myDevCardIds: source === "wire" ? [11, 11] : undefined,
       robberHex: { x: myHex.q, y: myHex.r }, // blocked — win-critical knight use
       now: 10_000,
     };
@@ -1485,7 +1503,7 @@ describe("autopilot decisions", () => {
     ap.onTurnState(3, 3);
     ap.onYouRolled();
     ap.onConfirm("buy-dev");
-    ap.tick({ ...ctx, knightsInHand: 1, now: 20_000 });
+    ap.tick({ ...ctx, knightsInHand: 1, myDevCardIds: source === "wire" ? [11] : undefined, now: 20_000 });
     expect(knights()).toBe(1); // still just the one knight
   });
 

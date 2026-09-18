@@ -3668,7 +3668,9 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
           nextIncome = discardIncome(tracker2, { ...gs, state: { ...gs.state, buildings } }, opts.robberHex);
         }
         const expectedLoss = expectedDiscardLoss(tracker2, hand, limit, savingRolls, nextIncome);
-        const value = (partial ? save.score : choice.score) + continuationValue - expectedLoss / 4 - conversion / 4 - (followsTarget ? 0 : delay);
+        const budgetLoss = followsTarget ? Math.max(0, save.score - continuationValue) : 0;
+        const conversionCost = Math.max(0, conversion / 4 - budgetLoss);
+        const value = (partial ? save.score : choice.score) + continuationValue - expectedLoss / 4 - conversionCost - (followsTarget ? 0 : delay);
         evaluation.spending.alternatives.push({
           kind: choice.kind,
           vertexId: choice.vertexId,
@@ -3677,7 +3679,7 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
           purchaseValue: partial ? 0 : choice.score,
           continuationValue,
           constructionDelay,
-          conversionCost: conversion / 4,
+          conversionCost,
           score: value
         });
         if (value > bestValue + 1e-9) {
@@ -3895,7 +3897,7 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
         discardPending: mustDiscard,
         // Knights held (dev-card id 11, from ground-truth state) beyond any dev
         // bought this turn (a fresh buy can't be played), and no dev played yet.
-        knightAvailable: !this.devPlayedThisTurn && ((ctx.myDevCardIds ?? []).filter((id) => id === 11).length || (ctx.knightsInHand ?? 0)) > this.devsBoughtThisTurn,
+        knightAvailable: !this.devPlayedThisTurn && (ctx.myDevCardIds !== void 0 ? ctx.myDevCardIds.filter((id) => id === 11).length : ctx.knightsInHand ?? 0) > this.devsBoughtThisTurn,
         bankDevCards: ctx.bankDevCards,
         piecesLeft: ctx.piecesLeft,
         // Playable only if we hold the card, haven't played a dev this turn, and
@@ -4075,7 +4077,7 @@ var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "sy
       byPlayers
     };
   }
-  const VERSION = "v1.27 endgame-defense";
+  const VERSION = "v1.29 discard-spending";
   const CSS = `
 #catan-copilot {
   --surface: #fcfcfb; --ink: #0b0b0b; --ink-2: #52514e; --ink-3: #898781;

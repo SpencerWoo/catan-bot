@@ -166,9 +166,9 @@ it("buys multiple development cards even when each purchase leaves residual risk
   expect(decide(0)?.kind).toBe("end-turn");
 });
 
-it("still saves when spending delays a much more valuable productive build", () => {
+it.each([false, true])("still saves when spending delays a much more valuable productive build (trade needed: %s)", (tradeNeeded) => {
   const t = riskTracker(true), us = t.players.get("Us")!;
-  us.hand = { wood: 3, brick: 3, ore: 1, wheat: 1, sheep: 2 };
+  us.hand = { wood: tradeNeeded ? 5 : 3, brick: 3, ore: 1, wheat: tradeNeeded ? 0 : 1, sheep: 2 };
   const planning = planPosition(t, "Us", null);
   planning.production = { ...zeroHand(), ore: 1, wheat: 1 };
   planning.horizon.turns = 12;

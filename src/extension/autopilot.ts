@@ -66,7 +66,7 @@ export interface AutopilotDecision {
         purchaseValue: number;
         continuationValue: number;
         constructionDelay: number | null; // own turns; null when unreachable
-        conversionCost: number; // score units, like purchaseValue/continuationValue
+        conversionCost: number; // additional score penalty; zero when the post-trade continuation already accounts for it
         score: number;
       }>;
     };
@@ -994,8 +994,8 @@ export function decideNext(opts: {
       // A dev purchase does not abandon the productive target. Credit its
       // remaining value using the actual post-purchase budget, with the same
       // horizon (so delayed construction loses production and is discounted).
-      // The purchase's resource cost is already removed from this budget;
-      // charging it again would penalize the same construction delay twice.
+      // Purchase and conversion costs are already removed from this budget.
+      // Their effect on the retained target must not be charged twice.
       let continuationValue = 0;
       let constructionDelay = Number.isFinite(afterWait) && Number.isFinite(competing?.wait ?? 0)
         ? Math.max(0, afterWait - (competing?.wait ?? 0)) : null;
@@ -1015,12 +1015,17 @@ export function decideNext(opts: {
         nextIncome = discardIncome(tracker, { ...gs, state: { ...gs.state, buildings } }, opts.robberHex);
       }
       const expectedLoss = expectedDiscardLoss(tracker, hand, limit, savingRolls, nextIncome);
+      // Retain the conversion-cost floor, but only charge the part not already
+      // reflected in the lost continuation value. Use the larger cost signal,
+      // rather than adding both penalties for the same depleted build budget.
+      const budgetLoss = followsTarget ? Math.max(0, save.score - continuationValue) : 0;
+      const conversionCost = Math.max(0, conversion / 4 - budgetLoss);
       const value = (partial ? save.score : choice.score) + continuationValue - expectedLoss / 4
-        - conversion / 4 - (followsTarget ? 0 : delay);
+        - conversionCost - (followsTarget ? 0 : delay);
       evaluation.spending.alternatives.push({ kind: choice.kind, vertexId: choice.vertexId,
         remainingCards: RESOURCES.reduce((n, r) => n + hand[r], 0), expectedLoss,
         purchaseValue: partial ? 0 : choice.score, continuationValue, constructionDelay,
-        conversionCost: conversion / 4, score: value });
+        conversionCost, score: value });
       if (value > bestValue + 1e-9) {
         bestValue = value; bestAction = action; evaluation.spending.selected = choice.kind;
       }
@@ -1224,7 +1229,7 @@ export class Autopilot {
     bankDevCards?: number | null;
     /** building pieces left in our supply (0 = can't build that piece) */
     piecesLeft?: { settlements: number | null; cities: number | null; roads: number | null };
-    /** dev-card type ids we hold (13 = monopoly) */
+    /** Wire dev-card type ids we hold; [] is known empty, undefined permits DOM fallback. */
     myDevCardIds?: number[];
     /** friendly robber: whether a given player may be robbed (>= 3 VP) */
     canRob?: (player: PlayerId) => boolean;
@@ -1318,8 +1323,9 @@ export class Autopilot {
       // bought this turn (a fresh buy can't be played), and no dev played yet.
       knightAvailable:
         !this.devPlayedThisTurn &&
-        ((ctx.myDevCardIds ?? []).filter((id) => id === 11).length ||
-          (ctx.knightsInHand ?? 0)) > this.devsBoughtThisTurn,
+        (ctx.myDevCardIds !== undefined
+          ? ctx.myDevCardIds.filter((id) => id === 11).length
+          : (ctx.knightsInHand ?? 0)) > this.devsBoughtThisTurn,
       bankDevCards: ctx.bankDevCards,
       piecesLeft: ctx.piecesLeft,
       // Playable only if we hold the card, haven't played a dev this turn, and

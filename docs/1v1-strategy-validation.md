@@ -135,9 +135,11 @@ count against spending. Partial trades must serve a productive target and stay
 on that target until purchase or turn end to prevent reverse exchanges. This
 supersedes the earlier blanket prohibition on incomplete bank trades.
 
-The loss estimate uses the current hand, values each lost card at one card unit
-(four cards per planner point), and does not simulate future income or repeated
-discards. It is a bounded decision heuristic, not a prediction of the game result.
+The loss estimate starts from the current hand and enumerates production and
+repeated discards through the next spending opportunity, using the current board
+and robber position. It values each lost card at one card unit (four cards per
+planner point). It does not simulate the full wait for a build, robber movement,
+or subsequent purchases. It is a bounded decision heuristic, not a prediction of the game result.
 Regression cases cover high/cold seven exposure, refills, multiplayer roll windows,
 threshold and residual losses, useful purchases, partial trades, conversion costs,
 and target retention. Existing recorded-game replays remain observational.
@@ -146,3 +148,42 @@ Holding above the limit remains an explicit choice when the investment reward
 outweighs available spending after accounting for risk. A winning hold decision
 is preserved through the pilot fallback and reports the accepted seven exposure;
 a regression protects a high-payoff city reserve even with high seven exposure.
+
+## v1.29: trade-funded spending before a discard
+
+The spending comparison previously charged a development purchase twice for
+using the future build's resource budget: its continuation score already used
+the hand after all trades and the purchase, but a separate conversion penalty
+was added in full. The comparison now uses the larger of that budget's lost
+continuation value and the existing conversion-cost estimate, rather than
+summing both. Conversion loss remains a floor: expensive exchanges do not
+become free just because another build is planned. Partial trades retain their
+existing cost/risk comparison and target commitment.
+
+This is a correction within the existing heuristic, with no new fitted weights,
+resource quotas, discard thresholds, or longer lookahead. It still considers
+residual discard risk and the delay to a productive city or settlement. A
+valuable city reserve, an immediately fundable city, and rejection of a wasteful
+two-trade dev purchase remain covered by passing controls.
+
+Two retained ForneroBJ positions now trade surplus for wheat and then purchase
+a development card. Decision 68 exchanges four wood; decision 87 exchanges four
+brick. Their modeled expected discarded-card counts before the next spending
+opportunity fall from 2.29 to 0 and from 2.74 to 0.36 respectively, with post-
+purchase hands of six and eight cards. Both comparisons include an estimated
+2.7-turn delay to the saved city. An older September 14 position (decision 52)
+now exchanges four sheep for wheat and buys a dev while retaining the value of
+later expansion. These are single-position comparisons, not alternate game
+results or measured win-rate gains. Incomplete capture histories also limit the
+accuracy of the balanced-dice estimates.
+
+The new fixture `fornero-discard.json` retains the original board, hands,
+planning inputs, decision identifiers, and observed rolls for those two cases.
+Tests follow each proposed trade through the funded purchase and verify the
+remaining card count. Opening and Longest Road strategy are unchanged.
+
+Validation: 347 tests passed (345 repository tests plus two local executor
+replays), TypeScript passed, production build passed, and `git diff --check`
+passed. The previously documented standalone smoke failures and missing
+`web-ext` executable remain unresolved; they were not rerun for this scoring
+change. The local v1.29 bundle is rebuilt but not installed in Firefox.
